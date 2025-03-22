@@ -50,6 +50,7 @@ namespace OpenRelay
             trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
             trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
             trayMenu.Items.Add("Debug", null, DebugItem_Click);
+            trayMenu.Items.Add("Key Tool", null, KeyToolItem_Click);
             trayMenu.Items.Add("-"); // Separator
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
             
@@ -72,7 +73,7 @@ namespace OpenRelay
                 // Then encryption service (depends on device manager)
                 encryptionService = new EncryptionService(deviceManager);
                 
-                // Initialize network service
+                // Start network service
                 networkService = new NetworkService(deviceManager, encryptionService);
                 
                 // Finally, start clipboard monitoring
@@ -258,6 +259,15 @@ namespace OpenRelay
             using (var debugForm = new UI.DebugForm(deviceManager, encryptionService))
             {
                 debugForm.ShowDialog();
+            }
+        }
+        
+        private void KeyToolItem_Click(object? sender, EventArgs e)
+        {
+            // Show key conversion tool
+            using (var keyTool = new UI.KeyConversionForm())
+            {
+                keyTool.ShowDialog();
             }
         }
         

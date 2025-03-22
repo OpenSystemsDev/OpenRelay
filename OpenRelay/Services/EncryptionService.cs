@@ -2,6 +2,7 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace OpenRelay.Services
 {
@@ -24,34 +25,97 @@ namespace OpenRelay.Services
             _deviceManager = deviceManager;
             _rsaProvider = RSA.Create(2048);
             
-            // Export public key
+            // Export public key in a consistent format
             PublicKey = Convert.ToBase64String(_rsaProvider.ExportSubjectPublicKeyInfo());
+            Console.WriteLine($"Generated public key: {PublicKey.Substring(0, 20)}...");
         }
         
         public string SignData(string data)
         {
-            var dataBytes = Encoding.UTF8.GetBytes(data);
-            var signature = _rsaProvider.SignData(dataBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            return Convert.ToBase64String(signature);
+            try
+            {
+                var dataBytes = Encoding.UTF8.GetBytes(data);
+                var signature = _rsaProvider.SignData(dataBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                return Convert.ToBase64String(signature);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error signing data: {ex.Message}");
+                throw;
+            }
         }
         
         public bool VerifySignature(string data, string signatureBase64, string publicKeyBase64)
         {
             try
             {
-                var dataBytes = Encoding.UTF8.GetBytes(data);
-                var signature = Convert.FromBase64String(signatureBase64);
-                var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
+                // Log diagnostic information
+                Console.WriteLine("------ SIGNATURE VERIFICATION ------");
+                Console.WriteLine($"Data: {data.Substring(0, Math.Min(data.Length, 20))}...");
+                Console.WriteLine($"Signature length: {signatureBase64.Length}");
+                Console.WriteLine($"Public key length: {publicKeyBase64.Length}");
                 
+                var dataBytes = Encoding.UTF8.GetBytes(data);
+                byte[] signature;
+                
+                try
+                {
+                    signature = Convert.FromBase64String(signatureBase64);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error decoding signature: {ex.Message}");
+                    return false;
+                }
+                
+                // Clean the public key (remove any whitespace)
+                publicKeyBase64 = publicKeyBase64.Trim();
+                
+                // Try standard import first
                 using (var rsa = RSA.Create())
                 {
-                    rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
-                    return rsa.VerifyData(dataBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    try
+                    {
+                        var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
+                        rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
+                        
+                        // Verify using the same algorithm used for signing
+                        bool result = rsa.VerifyData(dataBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                        Console.WriteLine($"Standard verification result: {result}");
+                        
+                        // If successful, return
+                        if (result) return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Standard import failed: {ex.Message}");
+                    }
+                    
+                    // If standard import fails, try other formats
+                    try
+                    {
+                        // Try with PKCS#1 format
+                        var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
+                        rsa.ImportRSAPublicKey(publicKeyBytes, out _);
+                        
+                        bool result = rsa.VerifyData(dataBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                        Console.WriteLine($"PKCS#1 verification result: {result}");
+                        
+                        if (result) return true;
+                    }
+                    catch (Exception ex) 
+                    {
+                        Console.WriteLine($"PKCS#1 import failed: {ex.Message}");
+                    }
                 }
+                
+                // If all verification attempts fail
+                Console.WriteLine("All verification methods failed");
+                return false;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error verifying signature: {ex.Message}");
+                Console.WriteLine($"Error during verification: {ex.Message}");
                 return false;
             }
         }
@@ -81,7 +145,17 @@ namespace OpenRelay.Services
                     byte[] encryptedKey;
                     using (var recipientRsa = RSA.Create())
                     {
-                        recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
+                        try 
+                        {
+                            // Try standard import
+                            recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
+                        }
+                        catch (Exception)
+                        {
+                            // Try PKCS#1 import as fallback
+                            recipientRsa.ImportRSAPublicKey(Convert.FromBase64String(recipientPublicKey), out _);
+                        }
+                        
                         encryptedKey = recipientRsa.Encrypt(aes.Key, RSAEncryptionPadding.OaepSHA256);
                     }
                     
@@ -149,7 +223,17 @@ namespace OpenRelay.Services
                     byte[] encryptedKey;
                     using (var recipientRsa = RSA.Create())
                     {
-                        recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
+                        try 
+                        {
+                            // Try standard import
+                            recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
+                        }
+                        catch (Exception)
+                        {
+                            // Try PKCS#1 import as fallback
+                            recipientRsa.ImportRSAPublicKey(Convert.FromBase64String(recipientPublicKey), out _);
+                        }
+                        
                         encryptedKey = recipientRsa.Encrypt(aes.Key, RSAEncryptionPadding.OaepSHA256);
                     }
                     
