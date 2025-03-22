@@ -1,3 +1,6 @@
+using System;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 using OpenRelay.Models;
 using OpenRelay.Services;
 
@@ -5,15 +8,18 @@ namespace OpenRelay
 {
     public partial class Form1 : Form
     {
-        private NotifyIcon? _trayIcon;
-        private ContextMenuStrip? _trayMenu;
-        private ToolStripMenuItem? _statusItem;
-
+        private NotifyIcon trayIcon;
+        private ContextMenuStrip trayMenu;
+        private ToolStripMenuItem statusItem;
+        
         // Services
-        private ClipboardMonitorService? _clipboardMonitor;
-        private DeviceManager? _deviceManager;
-        private EncryptionService? _encryptionService;
-        private NetworkService? _networkService;
+        private ClipboardMonitorService clipboardMonitor;
+        private DeviceManager deviceManager;
+        private EncryptionService encryptionService;
+        private NetworkService networkService;
+        
+        // Flag to prevent clipboard loops
+        private bool isUpdatingClipboard = false;
         
         public Form1()
         {
@@ -34,22 +40,23 @@ namespace OpenRelay
         
         private void SetupTrayIcon()
         {
-            _trayMenu = new ContextMenuStrip();
-            _statusItem = new ToolStripMenuItem("Status: Starting...");
-            _statusItem.Enabled = false;
-            _trayMenu.Items.Add(_statusItem);
-            _trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
-            _trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
-            _trayMenu.Items.Add("-"); // Separator
-            _trayMenu.Items.Add("Exit", null, ExitItem_Click);
+            trayMenu = new ContextMenuStrip();
+            statusItem = new ToolStripMenuItem("Status: Starting...");
+            statusItem.Enabled = false;
+            trayMenu.Items.Add(statusItem);
+            trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
+            trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
+            trayMenu.Items.Add("Debug", null, DebugItem_Click);
+            trayMenu.Items.Add("-"); // Separator
+            trayMenu.Items.Add("Exit", null, ExitItem_Click);
             
-            _trayIcon = new NotifyIcon();
-            _trayIcon.Text = "OpenRelay";
-            _trayIcon.Icon = System.Drawing.SystemIcons.Application; // Consider adding a custom icon
-            _trayIcon.ContextMenuStrip = _trayMenu;
-            _trayIcon.Visible = true;
+            trayIcon = new NotifyIcon();
+            trayIcon.Text = "OpenRelay";
+            trayIcon.Icon = System.Drawing.SystemIcons.Application; // Consider adding a custom icon
+            trayIcon.ContextMenuStrip = trayMenu;
+            trayIcon.Visible = true;
             
-            _trayIcon.DoubleClick += TrayIcon_DoubleClick;
+            trayIcon.DoubleClick += TrayIcon_DoubleClick;
         }
         
         private void InitializeServices()
@@ -57,13 +64,13 @@ namespace OpenRelay
             try
             {
                 // Initialize device manager first
-                _deviceManager = new DeviceManager();
+                deviceManager = new DeviceManager();
                 
                 // Then encryption service (depends on device manager)
-                _encryptionService = new EncryptionService(_deviceManager);
+                encryptionService = new EncryptionService(deviceManager);
                 
                 // Start network service
-                _networkService = new NetworkService(_deviceManager, _encryptionService);
+                networkService = new NetworkService(deviceManager, encryptionService);
                 
                 // Finally, start clipboard monitoring
                 StartClipboardMonitoring();
@@ -73,7 +80,7 @@ namespace OpenRelay
                 {
                     try
                     {
-                        await _networkService.StartAsync();
+                        await networkService.StartAsync();
                         UpdateStatus("Connected");
                     }
                     catch (Exception ex)
@@ -94,12 +101,12 @@ namespace OpenRelay
         {
             try
             {
-                _clipboardMonitor = new ClipboardMonitorService();
-                _clipboardMonitor.ClipboardChanged += ClipboardMonitor_ClipboardChanged;
-                _clipboardMonitor.Start();
+                clipboardMonitor = new ClipboardMonitorService();
+                clipboardMonitor.ClipboardChanged += ClipboardMonitor_ClipboardChanged;
+                clipboardMonitor.Start();
                 
                 // Set up callback for receiving clipboard data
-                _networkService.SetOnClipboardDataReceivedCallback(OnClipboardDataReceived);
+                networkService.SetOnClipboardDataReceivedCallback(OnClipboardDataReceived);
             }
             catch (Exception ex)
             {
@@ -110,14 +117,18 @@ namespace OpenRelay
         
         private void ClipboardMonitor_ClipboardChanged(object? sender, ClipboardChangedEventArgs e)
         {
+            // Skip if we're the ones updating the clipboard
+            if (isUpdatingClipboard)
+                return;
+                
             // Handle clipboard change here
             if (e.Data != null)
             {
                 // Send clipboard data to paired devices
-                _networkService.SendClipboardData(e.Data);
+                networkService.SendClipboardData(e.Data);
                 
                 // Show notification (for testing)
-                _trayIcon.ShowBalloonTip(
+                trayIcon.ShowBalloonTip(
                     2000, 
                     "Clipboard Updated", 
                     $"Format: {e.Data.Format}", 
@@ -137,6 +148,9 @@ namespace OpenRelay
                     return;
                 }
                 
+                // Set flag to prevent loops
+                isUpdatingClipboard = true;
+                
                 if (data.Format == "text/plain" && data.TextData != null)
                 {
                     Clipboard.SetText(data.TextData);
@@ -151,7 +165,7 @@ namespace OpenRelay
                 }
                 
                 // Show notification
-                _trayIcon.ShowBalloonTip(
+                trayIcon.ShowBalloonTip(
                     2000, 
                     "Clipboard Received", 
                     $"Format: {data.Format}", 
@@ -161,6 +175,21 @@ namespace OpenRelay
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating clipboard: {ex.Message}");
+            }
+            finally
+            {
+                // Reset flag after a short delay to ensure clipboard events are processed
+                System.Threading.Tasks.Task.Delay(100).ContinueWith(_ => 
+                {
+                    if (InvokeRequired)
+                    {
+                        Invoke(new Action(() => isUpdatingClipboard = false));
+                    }
+                    else
+                    {
+                        isUpdatingClipboard = false;
+                    }
+                });
             }
         }
         
@@ -172,7 +201,7 @@ namespace OpenRelay
                 return;
             }
             
-            _statusItem.Text = $"Status: {status}";
+            statusItem.Text = $"Status: {status}";
         }
         
         private void TrayIcon_DoubleClick(object? sender, EventArgs e)
@@ -189,7 +218,7 @@ namespace OpenRelay
         private void AddDeviceItem_Click(object? sender, EventArgs e)
         {
             // Show pairing UI
-            using (var pairingForm = new UI.PairingForm(_deviceManager, _deviceManager.LocalDeviceId, _encryptionService.PublicKey))
+            using (var pairingForm = new UI.PairingForm(deviceManager, deviceManager.LocalDeviceId, encryptionService.PublicKey))
             {
                 if (pairingForm.ShowDialog() == DialogResult.OK)
                 {
@@ -202,7 +231,7 @@ namespace OpenRelay
         private void ShowDevices()
         {
             // Show paired devices
-            var devices = _deviceManager.GetPairedDevices();
+            var devices = deviceManager.GetPairedDevices();
             if (devices.Count == 0)
             {
                 MessageBox.Show("No paired devices found. Add a device to get started.", "Devices", 
@@ -220,6 +249,15 @@ namespace OpenRelay
             MessageBox.Show(devicesText, "Paired Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         
+        private void DebugItem_Click(object? sender, EventArgs e)
+        {
+            // Show debug form
+            using (var debugForm = new UI.DebugForm(deviceManager, encryptionService))
+            {
+                debugForm.ShowDialog();
+            }
+        }
+        
         private void ExitItem_Click(object? sender, EventArgs e)
         {
             // Clean up and exit
@@ -229,15 +267,15 @@ namespace OpenRelay
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             // Clean up services
-            _clipboardMonitor?.Stop();
-            _clipboardMonitor?.Dispose();
+            clipboardMonitor?.Stop();
+            clipboardMonitor?.Dispose();
             
-            _networkService?.Dispose();
-            _encryptionService?.Dispose();
+            networkService?.Dispose();
+            encryptionService?.Dispose();
             
             // Clean up tray icon
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
             
             base.OnFormClosing(e);
         }
