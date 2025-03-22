@@ -51,6 +51,7 @@ namespace OpenRelay
             trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
             trayMenu.Items.Add("Debug", null, DebugItem_Click);
             trayMenu.Items.Add("Key Tool", null, KeyToolItem_Click);
+            trayMenu.Items.Add("Generate Keys", null, GenerateKeysItem_Click);
             trayMenu.Items.Add("-"); // Separator
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
             
@@ -268,6 +269,15 @@ namespace OpenRelay
             using (var keyTool = new UI.KeyConversionForm())
             {
                 keyTool.ShowDialog();
+            }
+        }
+        
+        private void GenerateKeysItem_Click(object? sender, EventArgs e)
+        {
+            // Show key generator
+            using (var keyGenerator = new UI.KeyGeneratorForm())
+            {
+                keyGenerator.ShowDialog();
             }
         }
         
