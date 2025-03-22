@@ -59,14 +59,19 @@ namespace OpenRelay.Models
         public int Port { get; set; }
         
         /// <summary>
-        /// Public key for verifying signatures
+        /// Shared encryption key (AES-256) for this device
         /// </summary>
-        public string PublicKey { get; set; } = string.Empty;
+        public string SharedKey { get; set; } = string.Empty;
         
         /// <summary>
         /// Last time this device was seen
         /// </summary>
         public DateTime LastSeen { get; set; }
+        
+        public override string ToString()
+        {
+            return $"{DeviceName} ({IpAddress})";
+        }
     }
     
     /// <summary>
@@ -75,7 +80,7 @@ namespace OpenRelay.Models
     public class ClipboardMessage
     {
         /// <summary>
-        /// Message type (e.g., "clipboard_update", "discovery", "pairing_request")
+        /// Message type (e.g., "clipboard_update", "pairing_request", "pairing_response")
         /// </summary>
         public string Type { get; set; } = string.Empty;
         
@@ -85,12 +90,17 @@ namespace OpenRelay.Models
         public string DeviceId { get; set; } = string.Empty;
         
         /// <summary>
+        /// Device name for display purposes
+        /// </summary>
+        public string DeviceName { get; set; } = string.Empty;
+        
+        /// <summary>
         /// Unix timestamp
         /// </summary>
         public long Timestamp { get; set; }
         
         /// <summary>
-        /// Format of the data
+        /// Format of the data (for clipboard updates)
         /// </summary>
         public string Format { get; set; } = string.Empty;
         
@@ -98,10 +108,5 @@ namespace OpenRelay.Models
         /// Encrypted data content (Base64 encoded)
         /// </summary>
         public string Data { get; set; } = string.Empty;
-        
-        /// <summary>
-        /// Signature for verification (Base64 encoded)
-        /// </summary>
-        public string Signature { get; set; } = string.Empty;
     }
 }

@@ -11,11 +11,11 @@ namespace OpenRelay.Services
     /// </summary>
     public class DeviceManager
     {
+        // Event for when a new pairing request arrives
+        public event EventHandler<PairingRequestEventArgs> PairingRequestReceived;
+        
         // List of paired devices
         private List<PairedDevice> _pairedDevices = new List<PairedDevice>();
-        
-        // Dictionary of encryption keys for each device
-        private Dictionary<string, byte[]> _encryptionKeys = new Dictionary<string, byte[]>();
         
         // Local device information
         public string LocalDeviceId { get; private set; }
@@ -41,6 +41,37 @@ namespace OpenRelay.Services
             }
             
             _storageFilePath = Path.Combine(appFolder, "paired_devices.json");
+            
+            // Try to load device ID from file if it exists
+            var deviceIdFilePath = Path.Combine(appFolder, "device_id.txt");
+            if (File.Exists(deviceIdFilePath))
+            {
+                try
+                {
+                    var lines = File.ReadAllLines(deviceIdFilePath);
+                    if (lines.Length >= 2)
+                    {
+                        LocalDeviceId = lines[0];
+                        LocalDeviceName = lines[1];
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error loading device ID: {ex.Message}");
+                }
+            }
+            else
+            {
+                // Save the new device ID
+                try
+                {
+                    File.WriteAllLines(deviceIdFilePath, new[] { LocalDeviceId, LocalDeviceName });
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error saving device ID: {ex.Message}");
+                }
+            }
             
             // Load paired devices
             LoadPairedDevices();
@@ -95,9 +126,9 @@ namespace OpenRelay.Services
             return _pairedDevices.Find(d => d.IpAddress == ipAddress);
         }
         
-        public PairedDevice? GetDeviceByPublicKey(string publicKey)
+        public bool IsPairedDevice(string deviceId)
         {
-            return _pairedDevices.Find(d => d.PublicKey == publicKey);
+            return _pairedDevices.Exists(d => d.DeviceId == deviceId);
         }
         
         public void AddOrUpdateDevice(PairedDevice device)
@@ -110,7 +141,7 @@ namespace OpenRelay.Services
                 existingDevice.DeviceName = device.DeviceName;
                 existingDevice.IpAddress = device.IpAddress;
                 existingDevice.Port = device.Port;
-                existingDevice.PublicKey = device.PublicKey;
+                existingDevice.SharedKey = device.SharedKey;
                 existingDevice.LastSeen = DateTime.Now;
             }
             else
@@ -127,7 +158,6 @@ namespace OpenRelay.Services
         public void RemoveDevice(string deviceId)
         {
             _pairedDevices.RemoveAll(d => d.DeviceId == deviceId);
-            _encryptionKeys.Remove(deviceId);
             
             // Save changes
             SavePairedDevices();
@@ -144,19 +174,39 @@ namespace OpenRelay.Services
             }
         }
         
-        public void StoreEncryptionKey(string deviceId, byte[] key)
+        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port)
         {
-            _encryptionKeys[deviceId] = key;
-        }
-        
-        public byte[]? GetEncryptionKey(string deviceId)
-        {
-            if (_encryptionKeys.TryGetValue(deviceId, out var key))
+            // Check if already paired
+            if (IsPairedDevice(deviceId))
             {
-                return key;
+                UpdateDeviceLastSeen(deviceId);
+                return true; // Already paired, accept automatically
             }
             
-            return null;
+            // Raise event for UI to handle
+            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port);
+            PairingRequestReceived?.Invoke(this, args);
+            
+            // Return the result (might be synchronous or asynchronous depending on UI)
+            return args.Accepted;
+        }
+    }
+    
+    public class PairingRequestEventArgs : EventArgs
+    {
+        public string DeviceId { get; }
+        public string DeviceName { get; }
+        public string IpAddress { get; }
+        public int Port { get; }
+        public bool Accepted { get; set; }
+        
+        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port)
+        {
+            DeviceId = deviceId;
+            DeviceName = deviceName;
+            IpAddress = ipAddress;
+            Port = port;
+            Accepted = false; // Default to not accepted
         }
     }
 }

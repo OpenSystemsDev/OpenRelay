@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using OpenRelay.Models;
 using OpenRelay.Services;
+using OpenRelay.UI;
 
 namespace OpenRelay
 {
@@ -50,8 +51,6 @@ namespace OpenRelay
             trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
             trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
             trayMenu.Items.Add("Debug", null, DebugItem_Click);
-            trayMenu.Items.Add("Key Tool", null, KeyToolItem_Click);
-            trayMenu.Items.Add("Generate Keys", null, GenerateKeysItem_Click);
             trayMenu.Items.Add("-"); // Separator
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
             
@@ -64,22 +63,27 @@ namespace OpenRelay
             trayIcon.DoubleClick += TrayIcon_DoubleClick;
         }
         
+        // Replace this section in the InitializeServices method of Form1.cs
+
         private void InitializeServices()
         {
             try
             {
                 // Initialize device manager first
                 deviceManager = new DeviceManager();
-                
-                // Then encryption service (depends on device manager)
-                encryptionService = new EncryptionService(deviceManager);
-                
+        
+                // Handle pairing requests
+                deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
+        
+                // Then encryption service
+                encryptionService = new EncryptionService();
+        
                 // Start network service
                 networkService = new NetworkService(deviceManager, encryptionService);
-                
+        
                 // Finally, start clipboard monitoring
                 StartClipboardMonitoring();
-                
+        
                 // Start network service
                 Task.Run(async () => 
                 {
@@ -99,6 +103,45 @@ namespace OpenRelay
             {
                 MessageBox.Show($"Error initializing services: {ex.Message}", "Error", 
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        
+        private void DeviceManager_PairingRequestReceived(object sender, PairingRequestEventArgs e)
+        {
+            // Need to show UI on the UI thread
+            if (InvokeRequired)
+            {
+                Invoke(new Action<object, PairingRequestEventArgs>(DeviceManager_PairingRequestReceived), sender, e);
+                return;
+            }
+            
+            // Show pairing request dialog
+            using (var dialog = new PairingRequestDialog(e.DeviceName, e.DeviceId, e.IpAddress))
+            {
+                dialog.ShowDialog();
+                
+                // Set the result
+                e.Accepted = dialog.Accepted;
+                
+                // If accepted, add the device with a new shared key
+                if (e.Accepted)
+                {
+                    // Generate a shared key
+                    string sharedKey = encryptionService.GenerateSharedKey();
+                    
+                    // Create and add the device
+                    var device = new PairedDevice
+                    {
+                        DeviceId = e.DeviceId,
+                        DeviceName = e.DeviceName,
+                        IpAddress = e.IpAddress,
+                        Port = e.Port,
+                        Platform = "Unknown", // Could be determined later
+                        SharedKey = sharedKey
+                    };
+                    
+                    deviceManager.AddOrUpdateDevice(device);
+                }
             }
         }
         
@@ -184,7 +227,7 @@ namespace OpenRelay
             finally
             {
                 // Reset flag after a short delay to ensure clipboard events are processed
-                System.Threading.Tasks.Task.Delay(100).ContinueWith(_ => 
+                Task.Delay(100).ContinueWith(_ => 
                 {
                     if (InvokeRequired)
                     {
@@ -222,15 +265,71 @@ namespace OpenRelay
         
         private void AddDeviceItem_Click(object? sender, EventArgs e)
         {
-            // Show pairing UI
-            using (var pairingForm = new UI.PairingForm(deviceManager, deviceManager.LocalDeviceId, encryptionService.PublicKey))
+            // Show IP input dialog
+            using (var dialog = new TextInputDialog("Add Device", "Enter the IP address of the device to pair with:"))
             {
-                if (pairingForm.ShowDialog() == DialogResult.OK)
+                if (dialog.ShowDialog() == DialogResult.OK)
                 {
-                    // The device has been added in the form
-                    ShowDevices();
+                    string ipAddress = dialog.InputText;
+                    
+                    // Send pairing request
+                    Task.Run(async () => 
+                    {
+                        bool success = await networkService.SendPairingRequestAsync(ipAddress);
+                        
+                        if (InvokeRequired)
+                        {
+                            Invoke(new Action<bool>(ShowPairingResult), success);
+                        }
+                        else
+                        {
+                            ShowPairingResult(success);
+                        }
+                    });
                 }
             }
+        }
+        
+        private void ShowPairingResult(bool success)
+        {
+            if (success)
+            {
+                MessageBox.Show(
+                    "Device paired successfully!",
+                    "Pairing Successful",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show(
+                    "Pairing failed. The device may have declined the request or wasn't reachable.",
+                    "Pairing Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+        
+        private void DebugItem_Click(object? sender, EventArgs e)
+        {
+            // Show simplified debug info
+            var devices = deviceManager.GetPairedDevices();
+            if (devices.Count == 0)
+            {
+                MessageBox.Show("No paired devices found. Add a device to get started.", "Devices", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            
+            var devicesText = "Paired Devices:\n\n";
+            foreach (var device in devices)
+            {
+                devicesText += $"{device.DeviceName} ({device.Platform})\n";
+                devicesText += $"IP: {device.IpAddress}:{device.Port}\n";
+                devicesText += $"Last seen: {device.LastSeen}\n\n";
+            }
+            
+            MessageBox.Show(devicesText, "Paired Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         
         private void ShowDevices()
@@ -254,33 +353,6 @@ namespace OpenRelay
             MessageBox.Show(devicesText, "Paired Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         
-        private void DebugItem_Click(object? sender, EventArgs e)
-        {
-            // Show debug form
-            using (var debugForm = new UI.DebugForm(deviceManager, encryptionService))
-            {
-                debugForm.ShowDialog();
-            }
-        }
-        
-        private void KeyToolItem_Click(object? sender, EventArgs e)
-        {
-            // Show key conversion tool
-            using (var keyTool = new UI.KeyConversionForm())
-            {
-                keyTool.ShowDialog();
-            }
-        }
-        
-        private void GenerateKeysItem_Click(object? sender, EventArgs e)
-        {
-            // Show key generator
-            using (var keyGenerator = new UI.KeyGeneratorForm())
-            {
-                keyGenerator.ShowDialog();
-            }
-        }
-        
         private void ExitItem_Click(object? sender, EventArgs e)
         {
             // Clean up and exit
@@ -294,7 +366,6 @@ namespace OpenRelay
             clipboardMonitor?.Dispose();
             
             networkService?.Dispose();
-            encryptionService?.Dispose();
             
             // Clean up tray icon
             trayIcon.Visible = false;

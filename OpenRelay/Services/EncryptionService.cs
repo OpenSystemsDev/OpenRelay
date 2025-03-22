@@ -2,194 +2,175 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace OpenRelay.Services
 {
     public class EncryptionService : IDisposable
     {
-        // RSA provider for signing and key exchange
-        private RSA _rsaProvider;
+        // AES key size must be 128, 192, or 256 bits
+        private const int KEY_SIZE_BYTES = 32; // 256 bits = 32 bytes
         
-        // AES key size
-        private const int AES_KEY_SIZE = 256;
-        
-        // Device manager to get paired device info
-        private DeviceManager _deviceManager;
-        
-        // Public key for this device
-        public string PublicKey { get; private set; }
-        
-        public EncryptionService(DeviceManager deviceManager)
-        {
-            _deviceManager = deviceManager;
-            _rsaProvider = RSA.Create(2048);
-            
-            // Export public key in a consistent format
-            PublicKey = Convert.ToBase64String(_rsaProvider.ExportSubjectPublicKeyInfo());
-            Console.WriteLine($"Generated public key: {PublicKey.Substring(0, 20)}...");
-        }
-        
-        public string SignData(string data)
+        /// <summary>
+        /// Generates a new shared key for device pairing
+        /// </summary>
+        public string GenerateSharedKey()
         {
             try
             {
-                var dataBytes = Encoding.UTF8.GetBytes(data);
-                var signature = _rsaProvider.SignData(dataBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                return Convert.ToBase64String(signature);
+                // Generate random bytes for the key (fixed size)
+                byte[] key = new byte[KEY_SIZE_BYTES];
+                using (var rng = RandomNumberGenerator.Create())
+                {
+                    rng.GetBytes(key);
+                }
+                
+                // Return the key as a Base64 string
+                Console.WriteLine($"Generated key of length {key.Length} bytes");
+                return Convert.ToBase64String(key);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error signing data: {ex.Message}");
+                Console.WriteLine($"Error generating shared key: {ex.Message}");
                 throw;
             }
         }
         
-        public bool VerifySignature(string data, string signatureBase64, string publicKeyBase64)
+        public string EncryptString(string plainText, string base64Key)
         {
-            try
+            // Convert key from Base64
+            byte[] key = Convert.FromBase64String(base64Key);
+            Console.WriteLine($"[ENCRYPT] Key length: {key.Length} bytes");
+            
+            if (string.IsNullOrEmpty(plainText))
             {
-                // Log diagnostic information
-                Console.WriteLine("------ SIGNATURE VERIFICATION ------");
-                Console.WriteLine($"Data: {data.Substring(0, Math.Min(data.Length, 20))}...");
-                Console.WriteLine($"Signature length: {signatureBase64.Length}");
-                Console.WriteLine($"Public key length: {publicKeyBase64.Length}");
-                
-                var dataBytes = Encoding.UTF8.GetBytes(data);
-                byte[] signature;
-                
-                try
+                Console.WriteLine("[ENCRYPT] WARNING: Empty text to encrypt");
+                return string.Empty;
+            }
+            
+            // Create and configure AES algorithm
+            using (Aes aes = Aes.Create())
+            {
+                // Ensure key size is valid (16, 24, or 32 bytes)
+                if (key.Length != 16 && key.Length != 24 && key.Length != 32)
                 {
-                    signature = Convert.FromBase64String(signatureBase64);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error decoding signature: {ex.Message}");
-                    return false;
+                    throw new ArgumentException($"Key must be 16, 24, or 32 bytes, but was {key.Length} bytes");
                 }
                 
-                // Clean the public key (remove any whitespace)
-                publicKeyBase64 = publicKeyBase64.Trim();
+                aes.Key = key;
+                aes.GenerateIV(); // Generate random IV
+                Console.WriteLine($"[ENCRYPT] Generated IV length: {aes.IV.Length} bytes");
                 
-                // Try standard import first
-                using (var rsa = RSA.Create())
+                using (MemoryStream ms = new MemoryStream())
                 {
-                    try
+                    // First write the length of the IV
+                    byte[] ivLengthBytes = BitConverter.GetBytes(aes.IV.Length);
+                    ms.Write(ivLengthBytes, 0, ivLengthBytes.Length);
+                    Console.WriteLine($"[ENCRYPT] Wrote IV length bytes: {ivLengthBytes.Length} bytes");
+                    
+                    // Then write the IV
+                    ms.Write(aes.IV, 0, aes.IV.Length);
+                    Console.WriteLine($"[ENCRYPT] Wrote IV: {aes.IV.Length} bytes");
+                    
+                    using (CryptoStream cs = new CryptoStream(
+                        ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
                     {
-                        var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
-                        rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
+                        // Convert the plaintext to bytes
+                        byte[] plaintextBytes = Encoding.UTF8.GetBytes(plainText);
+                        Console.WriteLine($"[ENCRYPT] Plaintext length: {plaintextBytes.Length} bytes");
                         
-                        // Verify using the same algorithm used for signing
-                        bool result = rsa.VerifyData(dataBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                        Console.WriteLine($"Standard verification result: {result}");
-                        
-                        // If successful, return
-                        if (result) return true;
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Standard import failed: {ex.Message}");
+                        // Write the plaintext to the CryptoStream
+                        cs.Write(plaintextBytes, 0, plaintextBytes.Length);
+                        cs.FlushFinalBlock(); // Important to flush
                     }
                     
-                    // If standard import fails, try other formats
-                    try
-                    {
-                        // Try with PKCS#1 format
-                        var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
-                        rsa.ImportRSAPublicKey(publicKeyBytes, out _);
-                        
-                        bool result = rsa.VerifyData(dataBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                        Console.WriteLine($"PKCS#1 verification result: {result}");
-                        
-                        if (result) return true;
-                    }
-                    catch (Exception ex) 
-                    {
-                        Console.WriteLine($"PKCS#1 import failed: {ex.Message}");
-                    }
+                    byte[] encryptedData = ms.ToArray();
+                    Console.WriteLine($"[ENCRYPT] Final encrypted data length: {encryptedData.Length} bytes");
+                    
+                    // Return as Base64
+                    return Convert.ToBase64String(encryptedData);
                 }
-                
-                // If all verification attempts fail
-                Console.WriteLine("All verification methods failed");
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error during verification: {ex.Message}");
-                return false;
             }
         }
         
-        public string EncryptData(string data, string recipientPublicKey)
+        public string DecryptString(string base64Ciphertext, string base64Key)
+        {
+            if (string.IsNullOrEmpty(base64Ciphertext))
+            {
+                Console.WriteLine("[DECRYPT] WARNING: Empty ciphertext to decrypt");
+                return string.Empty;
+            }
+            
+            // Convert key from Base64
+            byte[] key = Convert.FromBase64String(base64Key);
+            Console.WriteLine($"[DECRYPT] Key length: {key.Length} bytes");
+            
+            // Convert ciphertext from Base64
+            byte[] ciphertext = Convert.FromBase64String(base64Ciphertext);
+            Console.WriteLine($"[DECRYPT] Ciphertext length: {ciphertext.Length} bytes");
+            
+            // Ensure we have enough data
+            if (ciphertext.Length <= 4)
+            {
+                throw new ArgumentException("Ciphertext is too short to contain IV length");
+            }
+            
+            using (MemoryStream ms = new MemoryStream(ciphertext))
+            {
+                // First read the length of the IV
+                byte[] ivLengthBytes = new byte[4]; // Int32 size
+                ms.Read(ivLengthBytes, 0, ivLengthBytes.Length);
+                int ivLength = BitConverter.ToInt32(ivLengthBytes, 0);
+                Console.WriteLine($"[DECRYPT] Read IV length: {ivLength} bytes");
+                
+                // Validate IV length
+                if (ivLength <= 0 || ivLength > 16 || ivLength + 4 > ciphertext.Length)
+                {
+                    throw new ArgumentException($"Invalid IV length: {ivLength}");
+                }
+                
+                // Read the IV
+                byte[] iv = new byte[ivLength];
+                ms.Read(iv, 0, ivLength);
+                Console.WriteLine($"[DECRYPT] Read IV of length: {iv.Length} bytes");
+                
+                // Create and configure AES algorithm
+                using (Aes aes = Aes.Create())
+                {
+                    // Ensure key size is valid (16, 24, or 32 bytes)
+                    if (key.Length != 16 && key.Length != 24 && key.Length != 32)
+                    {
+                        throw new ArgumentException($"Key must be 16, 24, or 32 bytes, but was {key.Length} bytes");
+                    }
+                    
+                    aes.Key = key;
+                    aes.IV = iv;
+                    
+                    // The remaining bytes in the memory stream are the encrypted data
+                    int encryptedDataLength = (int)ms.Length - 4 - ivLength;
+                    Console.WriteLine($"[DECRYPT] Encrypted data length: {encryptedDataLength} bytes");
+                    
+                    // Create a crypto stream to decrypt the data
+                    using (CryptoStream cs = new CryptoStream(
+                        ms, aes.CreateDecryptor(), CryptoStreamMode.Read))
+                    {
+                        // Read the decrypted data
+                        using (StreamReader sr = new StreamReader(cs))
+                        {
+                            return sr.ReadToEnd();
+                        }
+                    }
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Encrypts data using a shared key
+        /// </summary>
+        public string EncryptData(string data, string sharedKeyBase64)
         {
             try
             {
-                // Get device's shared key
-                var device = _deviceManager.GetDeviceByPublicKey(recipientPublicKey);
-                if (device == null)
-                {
-                    throw new InvalidOperationException("Device not found");
-                }
-                
-                // Encrypt with AES
-                using (var aes = Aes.Create())
-                {
-                    aes.KeySize = AES_KEY_SIZE;
-                    aes.GenerateKey();
-                    aes.GenerateIV();
-                    
-                    // Store the key for this device
-                    _deviceManager.StoreEncryptionKey(device.DeviceId, aes.Key);
-                    
-                    // Encrypt the key with RSA
-                    byte[] encryptedKey;
-                    using (var recipientRsa = RSA.Create())
-                    {
-                        try 
-                        {
-                            // Try standard import
-                            recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
-                        }
-                        catch (Exception)
-                        {
-                            // Try PKCS#1 import as fallback
-                            recipientRsa.ImportRSAPublicKey(Convert.FromBase64String(recipientPublicKey), out _);
-                        }
-                        
-                        encryptedKey = recipientRsa.Encrypt(aes.Key, RSAEncryptionPadding.OaepSHA256);
-                    }
-                    
-                    // Encrypt the data with AES
-                    byte[] encryptedData;
-                    using (var encryptor = aes.CreateEncryptor())
-                    using (var ms = new MemoryStream())
-                    {
-                        using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
-                        using (var sw = new StreamWriter(cs))
-                        {
-                            sw.Write(data);
-                        }
-                        encryptedData = ms.ToArray();
-                    }
-                    
-                    // Create the final message
-                    using (var ms = new MemoryStream())
-                    {
-                        // Write the encrypted key length
-                        ms.Write(BitConverter.GetBytes(encryptedKey.Length), 0, 4);
-                        
-                        // Write the encrypted key
-                        ms.Write(encryptedKey, 0, encryptedKey.Length);
-                        
-                        // Write the IV
-                        ms.Write(aes.IV, 0, aes.IV.Length);
-                        
-                        // Write the encrypted data
-                        ms.Write(encryptedData, 0, encryptedData.Length);
-                        
-                        return Convert.ToBase64String(ms.ToArray());
-                    }
-                }
+                return EncryptString(data, sharedKeyBase64);
             }
             catch (Exception ex)
             {
@@ -198,75 +179,17 @@ namespace OpenRelay.Services
             }
         }
         
-        public string EncryptBinaryData(byte[] data, string recipientPublicKey)
+        /// <summary>
+        /// Encrypts binary data using a shared key
+        /// </summary>
+        public string EncryptBinaryData(byte[] data, string sharedKeyBase64)
         {
             try
             {
-                // Get device's shared key
-                var device = _deviceManager.GetDeviceByPublicKey(recipientPublicKey);
-                if (device == null)
-                {
-                    throw new InvalidOperationException("Device not found");
-                }
-                
-                // Encrypt with AES
-                using (var aes = Aes.Create())
-                {
-                    aes.KeySize = AES_KEY_SIZE;
-                    aes.GenerateKey();
-                    aes.GenerateIV();
-                    
-                    // Store the key for this device
-                    _deviceManager.StoreEncryptionKey(device.DeviceId, aes.Key);
-                    
-                    // Encrypt the key with RSA
-                    byte[] encryptedKey;
-                    using (var recipientRsa = RSA.Create())
-                    {
-                        try 
-                        {
-                            // Try standard import
-                            recipientRsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(recipientPublicKey), out _);
-                        }
-                        catch (Exception)
-                        {
-                            // Try PKCS#1 import as fallback
-                            recipientRsa.ImportRSAPublicKey(Convert.FromBase64String(recipientPublicKey), out _);
-                        }
-                        
-                        encryptedKey = recipientRsa.Encrypt(aes.Key, RSAEncryptionPadding.OaepSHA256);
-                    }
-                    
-                    // Encrypt the data with AES
-                    byte[] encryptedData;
-                    using (var encryptor = aes.CreateEncryptor())
-                    using (var ms = new MemoryStream())
-                    {
-                        using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
-                        {
-                            cs.Write(data, 0, data.Length);
-                        }
-                        encryptedData = ms.ToArray();
-                    }
-                    
-                    // Create the final message
-                    using (var ms = new MemoryStream())
-                    {
-                        // Write the encrypted key length
-                        ms.Write(BitConverter.GetBytes(encryptedKey.Length), 0, 4);
-                        
-                        // Write the encrypted key
-                        ms.Write(encryptedKey, 0, encryptedKey.Length);
-                        
-                        // Write the IV
-                        ms.Write(aes.IV, 0, aes.IV.Length);
-                        
-                        // Write the encrypted data
-                        ms.Write(encryptedData, 0, encryptedData.Length);
-                        
-                        return Convert.ToBase64String(ms.ToArray());
-                    }
-                }
+                // Convert binary data to Base64 string and encrypt that
+                // (slightly inefficient but ensures consistent handling)
+                string base64Data = Convert.ToBase64String(data);
+                return EncryptString(base64Data, sharedKeyBase64);
             }
             catch (Exception ex)
             {
@@ -275,52 +198,14 @@ namespace OpenRelay.Services
             }
         }
         
-        public string DecryptData(string encryptedDataBase64)
+        /// <summary>
+        /// Decrypts data using a shared key
+        /// </summary>
+        public string DecryptData(string encryptedDataBase64, string sharedKeyBase64)
         {
             try
             {
-                var encryptedFullData = Convert.FromBase64String(encryptedDataBase64);
-                
-                using (var ms = new MemoryStream(encryptedFullData))
-                {
-                    // Read the encrypted key length
-                    var keyLengthBytes = new byte[4];
-                    ms.Read(keyLengthBytes, 0, 4);
-                    var keyLength = BitConverter.ToInt32(keyLengthBytes, 0);
-                    
-                    // Read the encrypted key
-                    var encryptedKey = new byte[keyLength];
-                    ms.Read(encryptedKey, 0, keyLength);
-                    
-                    // Decrypt the key with our private key
-                    var key = _rsaProvider.Decrypt(encryptedKey, RSAEncryptionPadding.OaepSHA256);
-                    
-                    // Read the IV
-                    var iv = new byte[16]; // AES block size
-                    ms.Read(iv, 0, iv.Length);
-                    
-                    // Read the encrypted data
-                    var encryptedData = new byte[encryptedFullData.Length - 4 - keyLength - iv.Length];
-                    ms.Read(encryptedData, 0, encryptedData.Length);
-                    
-                    // Decrypt the data
-                    using (var aes = Aes.Create())
-                    {
-                        aes.Key = key;
-                        aes.IV = iv;
-                        
-                        using (var decryptor = aes.CreateDecryptor())
-                        using (var decryptedMs = new MemoryStream())
-                        {
-                            using (var cs = new CryptoStream(decryptedMs, decryptor, CryptoStreamMode.Write))
-                            {
-                                cs.Write(encryptedData, 0, encryptedData.Length);
-                            }
-                            
-                            return Encoding.UTF8.GetString(decryptedMs.ToArray());
-                        }
-                    }
-                }
+                return DecryptString(encryptedDataBase64, sharedKeyBase64);
             }
             catch (Exception ex)
             {
@@ -329,52 +214,16 @@ namespace OpenRelay.Services
             }
         }
         
-        public byte[] DecryptBinaryData(string encryptedDataBase64)
+        /// <summary>
+        /// Decrypts binary data using a shared key
+        /// </summary>
+        public byte[] DecryptBinaryData(string encryptedDataBase64, string sharedKeyBase64)
         {
             try
             {
-                var encryptedFullData = Convert.FromBase64String(encryptedDataBase64);
-                
-                using (var ms = new MemoryStream(encryptedFullData))
-                {
-                    // Read the encrypted key length
-                    var keyLengthBytes = new byte[4];
-                    ms.Read(keyLengthBytes, 0, 4);
-                    var keyLength = BitConverter.ToInt32(keyLengthBytes, 0);
-                    
-                    // Read the encrypted key
-                    var encryptedKey = new byte[keyLength];
-                    ms.Read(encryptedKey, 0, keyLength);
-                    
-                    // Decrypt the key with our private key
-                    var key = _rsaProvider.Decrypt(encryptedKey, RSAEncryptionPadding.OaepSHA256);
-                    
-                    // Read the IV
-                    var iv = new byte[16]; // AES block size
-                    ms.Read(iv, 0, iv.Length);
-                    
-                    // Read the encrypted data
-                    var encryptedData = new byte[encryptedFullData.Length - 4 - keyLength - iv.Length];
-                    ms.Read(encryptedData, 0, encryptedData.Length);
-                    
-                    // Decrypt the data
-                    using (var aes = Aes.Create())
-                    {
-                        aes.Key = key;
-                        aes.IV = iv;
-                        
-                        using (var decryptor = aes.CreateDecryptor())
-                        using (var decryptedMs = new MemoryStream())
-                        {
-                            using (var cs = new CryptoStream(decryptedMs, decryptor, CryptoStreamMode.Write))
-                            {
-                                cs.Write(encryptedData, 0, encryptedData.Length);
-                            }
-                            
-                            return decryptedMs.ToArray();
-                        }
-                    }
-                }
+                // Decrypt to Base64 string, then convert back to binary
+                string base64Data = DecryptString(encryptedDataBase64, sharedKeyBase64);
+                return Convert.FromBase64String(base64Data);
             }
             catch (Exception ex)
             {
@@ -385,7 +234,7 @@ namespace OpenRelay.Services
         
         public void Dispose()
         {
-            _rsaProvider.Dispose();
+            // Nothing to dispose
             GC.SuppressFinalize(this);
         }
     }

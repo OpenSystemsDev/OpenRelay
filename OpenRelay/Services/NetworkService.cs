@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using WebSocketSharp;
@@ -31,17 +32,23 @@ namespace OpenRelay.Services
         // Port for WebSocket server
         private int _port = 9876;
         
-        // Device ID of this device
+        // Local device information
         private string _deviceId;
+        private string _deviceName;
         
         // Callback for when clipboard data is received
         private Action<ClipboardData>? _onClipboardDataReceived;
+        
+        // Task completion sources for pairing requests
+        private Dictionary<string, TaskCompletionSource<bool>> _pairingResponses = 
+            new Dictionary<string, TaskCompletionSource<bool>>();
         
         public NetworkService(DeviceManager deviceManager, EncryptionService encryptionService)
         {
             _deviceManager = deviceManager;
             _encryptionService = encryptionService;
             _deviceId = deviceManager.LocalDeviceId;
+            _deviceName = deviceManager.LocalDeviceName;
         }
         
         public async Task StartAsync()
@@ -127,9 +134,9 @@ namespace OpenRelay.Services
                 // Continue listening for new services
                 var subscription = ZeroconfResolver.ResolveContinuous(
                     SERVICE_NAME,
-                    TimeSpan.FromSeconds(60),  // Timeout
-                    2,                   // Retries
-                    100       // Max services per endpoint
+                    TimeSpan.FromSeconds(5),  // Timeout
+                    2,               // Scan time
+                    100
                 );
                 
                 // Subscribe to the results
@@ -152,6 +159,173 @@ namespace OpenRelay.Services
             }
         }
         
+        public async Task<bool> SendPairingRequestAsync(string ipAddress, int port = 9876)
+        {
+            try
+            {
+                Console.WriteLine($"Sending pairing request to {ipAddress}:{port}");
+                
+                // Create a websocket connection to the device
+                var url = $"ws://{ipAddress}:{port}/clipboard";
+                var ws = new WebSocket(url);
+                
+                var taskCompletionSource = new TaskCompletionSource<bool>();
+                
+                ws.OnOpen += (sender, e) => {
+                    Console.WriteLine($"Connected to {ipAddress}, sending pairing request");
+                    
+                    // Store the TCS for the response
+                    string requestId = Guid.NewGuid().ToString();
+                    _pairingResponses[requestId] = taskCompletionSource;
+                    
+                    // Send pairing request
+                    var pairingRequest = new Dictionary<string, string> {
+                        { "type", "pairing_request" },
+                        { "request_id", requestId },
+                        { "device_id", _deviceId },
+                        { "device_name", _deviceName }
+                    };
+                    
+                    ws.Send(JsonConvert.SerializeObject(pairingRequest));
+                };
+                
+                ws.OnMessage += (sender, e) => {
+                    try
+                    {
+                        var response = JsonConvert.DeserializeObject<Dictionary<string, string>>(e.Data);
+                        if (response != null && 
+                            response.TryGetValue("type", out var type) && 
+                            type == "pairing_response" &&
+                            response.TryGetValue("request_id", out var requestId) &&
+                            _pairingResponses.TryGetValue(requestId, out var tcs))
+                        {
+                            if (response.TryGetValue("status", out var status) && status == "accepted")
+                            {
+                                Console.WriteLine("Pairing request accepted");
+                                
+                                // Create a shared key
+                                string sharedKey = _encryptionService.GenerateSharedKey();
+                                Console.WriteLine($"Generated shared key for pairing. Length: {sharedKey.Length}");
+
+                                try {
+                                    byte[] keyBytes = Convert.FromBase64String(sharedKey);
+                                    Console.WriteLine($"Decoded key length: {keyBytes.Length} bytes");
+                                    
+                                    // Ensure key meets AES requirements (16, 24, or 32 bytes)
+                                    if (keyBytes.Length != 16 && keyBytes.Length != 24 && keyBytes.Length != 32)
+                                    {
+                                        Console.WriteLine($"WARNING: Invalid key size: {keyBytes.Length} bytes. Generating new key.");
+                                        
+                                        // Generate a fixed-size 32-byte key instead
+                                        keyBytes = new byte[32]; // 256 bits
+                                        using (var rng = RandomNumberGenerator.Create())
+                                        {
+                                            rng.GetBytes(keyBytes);
+                                        }
+                                        sharedKey = Convert.ToBase64String(keyBytes);
+                                        Console.WriteLine($"New key generated with length: {keyBytes.Length} bytes");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Error validating key: {ex.Message}. Generating new fixed key.");
+                                    
+                                    // Generate a fixed-size 32-byte key instead
+                                    byte[] keyBytes = new byte[32]; // 256 bits
+                                    using (var rng = RandomNumberGenerator.Create())
+                                    {
+                                        rng.GetBytes(keyBytes);
+                                    }
+                                    sharedKey = Convert.ToBase64String(keyBytes);
+                                }
+                                
+                                // Get remote device info
+                                if (response.TryGetValue("device_id", out var remoteDeviceId) &&
+                                    response.TryGetValue("device_name", out var remoteDeviceName))
+                                {
+                                    // Add the device to paired devices
+                                    var device = new PairedDevice
+                                    {
+                                        DeviceId = remoteDeviceId,
+                                        DeviceName = remoteDeviceName,
+                                        IpAddress = ipAddress,
+                                        Port = port,
+                                        Platform = "Unknown", // Could be added to protocol
+                                        SharedKey = sharedKey
+                                    };
+                                    
+                                    _deviceManager.AddOrUpdateDevice(device);
+                                    
+                                    // Send the shared key
+                                    var keyMessage = new Dictionary<string, string> {
+                                        { "type", "shared_key" },
+                                        { "request_id", requestId },
+                                        { "shared_key", sharedKey }
+                                    };
+                                    
+                                    ws.Send(JsonConvert.SerializeObject(keyMessage));
+                                    
+                                    // Success
+                                    tcs.SetResult(true);
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Missing device info in pairing response");
+                                    tcs.SetResult(false);
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Pairing request declined");
+                                tcs.SetResult(false);
+                            }
+                            
+                            // Remove the TCS
+                            _pairingResponses.Remove(requestId);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error handling pairing response: {ex.Message}");
+                        taskCompletionSource.SetException(ex);
+                    }
+                };
+                
+                ws.OnError += (sender, e) => {
+                    Console.WriteLine($"Pairing error: {e.Message}");
+                    taskCompletionSource.SetException(new Exception(e.Message));
+                };
+                
+                ws.OnClose += (sender, e) => {
+                    if (!taskCompletionSource.Task.IsCompleted)
+                    {
+                        Console.WriteLine($"Connection closed during pairing: {e.Reason}");
+                        taskCompletionSource.SetResult(false);
+                    }
+                };
+                
+                ws.Connect();
+                
+                // Wait for pairing result with timeout
+                var timeoutTask = Task.Delay(30000); // 30 second timeout
+                var completedTask = await Task.WhenAny(taskCompletionSource.Task, timeoutTask);
+                
+                if (completedTask == timeoutTask)
+                {
+                    Console.WriteLine("Pairing timed out");
+                    ws.Close();
+                    return false;
+                }
+                
+                return await taskCompletionSource.Task;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending pairing request: {ex.Message}");
+                return false;
+            }
+        }
+        
         private void ConnectToDevice(PairedDevice device)
         {
             try
@@ -171,8 +345,8 @@ namespace OpenRelay.Services
                     // Send authentication message
                     var authMessage = new Dictionary<string, string> {
                         { "type", "auth" },
-                        { "deviceId", _deviceId },
-                        { "signature", _encryptionService.SignData(_deviceId) }
+                        { "device_id", _deviceId },
+                        { "device_name", _deviceName }
                     };
                     
                     ws.Send(JsonConvert.SerializeObject(authMessage));
@@ -218,15 +392,31 @@ namespace OpenRelay.Services
                         }
                     }
                     
-                    // Encrypt the data for this device
+                    // Verify shared key is valid
+                    try {
+                        byte[] keyBytes = Convert.FromBase64String(device.SharedKey);
+                        Console.WriteLine($"Using shared key length: {keyBytes.Length} bytes for device {device.DeviceName}");
+                        
+                        if (keyBytes.Length != 16 && keyBytes.Length != 24 && keyBytes.Length != 32)
+                        {
+                            Console.WriteLine($"WARNING: Invalid key size for device {device.DeviceName}: {keyBytes.Length} bytes. Skipping.");
+                            continue;
+                        }
+                    }
+                    catch (Exception ex) {
+                        Console.WriteLine($"Error with shared key for device {device.DeviceName}: {ex.Message}. Skipping.");
+                        continue;
+                    }
+                    
+                    // Encrypt the data with the shared key
                     string encryptedData;
                     if (data.Format == "text/plain" && data.TextData != null)
                     {
-                        encryptedData = _encryptionService.EncryptData(data.TextData, device.PublicKey);
+                        encryptedData = _encryptionService.EncryptData(data.TextData, device.SharedKey);
                     }
                     else if (data.BinaryData != null)
                     {
-                        encryptedData = _encryptionService.EncryptBinaryData(data.BinaryData, device.PublicKey);
+                        encryptedData = _encryptionService.EncryptBinaryData(data.BinaryData, device.SharedKey);
                     }
                     else
                     {
@@ -238,10 +428,10 @@ namespace OpenRelay.Services
                     {
                         Type = "clipboard_update",
                         DeviceId = _deviceId,
+                        DeviceName = _deviceName,
                         Timestamp = data.Timestamp,
                         Format = data.Format,
-                        Data = encryptedData,
-                        Signature = _encryptionService.SignData(encryptedData)
+                        Data = encryptedData
                     };
                     
                     // Send message
@@ -258,51 +448,149 @@ namespace OpenRelay.Services
         {
             try
             {
-                var msg = JsonConvert.DeserializeObject<ClipboardMessage>(message);
-                
-                if (msg == null)
+                // First try to parse as a clipboard message
+                try
                 {
-                    return;
+                    var msg = JsonConvert.DeserializeObject<ClipboardMessage>(message);
+                    
+                    if (msg != null && msg.Type == "clipboard_update")
+                    {
+                        // Verify shared key is valid
+                        try {
+                            byte[] keyBytes = Convert.FromBase64String(device.SharedKey);
+                            Console.WriteLine($"Using shared key length: {keyBytes.Length} bytes for device {device.DeviceName}");
+                            
+                            if (keyBytes.Length != 16 && keyBytes.Length != 24 && keyBytes.Length != 32)
+                            {
+                                Console.WriteLine($"WARNING: Invalid key size for device {device.DeviceName}: {keyBytes.Length} bytes. Skipping message.");
+                                return;
+                            }
+                        }
+                        catch (Exception ex) {
+                            Console.WriteLine($"Error with shared key for device {device.DeviceName}: {ex.Message}. Skipping message.");
+                            return;
+                        }
+                        
+                        // Create clipboard data
+                        var clipboardData = new ClipboardData
+                        {
+                            Format = msg.Format,
+                            Timestamp = msg.Timestamp
+                        };
+                        
+                        // Decrypt data with the shared key
+                        if (msg.Format == "text/plain")
+                        {
+                            clipboardData.TextData = _encryptionService.DecryptData(msg.Data, device.SharedKey);
+                        }
+                        else if (msg.Format == "image/png")
+                        {
+                            clipboardData.BinaryData = _encryptionService.DecryptBinaryData(msg.Data, device.SharedKey);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Unsupported format: {msg.Format}");
+                            return;
+                        }
+                        
+                        // Update clipboard
+                        _onClipboardDataReceived?.Invoke(clipboardData);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error handling clipboard message: {ex.Message}");
                 }
                 
-                if (msg.Type == "clipboard_update")
+                // If not a clipboard message, try as a dictionary
+                var dict = JsonConvert.DeserializeObject<Dictionary<string, string>>(message);
+                
+                if (dict != null && dict.TryGetValue("type", out var type))
                 {
-                    // Verify signature
-                    if (!_encryptionService.VerifySignature(msg.Data, msg.Signature, device.PublicKey))
+                    switch (type)
                     {
-                        Console.WriteLine("Invalid signature, rejecting message");
-                        return;
+                        case "auth":
+                            HandleAuthMessage(dict, device);
+                            break;
+                            
+                        case "shared_key":
+                            HandleSharedKeyMessage(dict, device);
+                            break;
                     }
-                    
-                    // Create clipboard data
-                    var clipboardData = new ClipboardData
-                    {
-                        Format = msg.Format,
-                        Timestamp = msg.Timestamp
-                    };
-                    
-                    // Decrypt data
-                    if (msg.Format == "text/plain")
-                    {
-                        clipboardData.TextData = _encryptionService.DecryptData(msg.Data);
-                    }
-                    else if (msg.Format == "image/png")
-                    {
-                        clipboardData.BinaryData = _encryptionService.DecryptBinaryData(msg.Data);
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Unsupported format: {msg.Format}");
-                        return;
-                    }
-                    
-                    // Update clipboard
-                    _onClipboardDataReceived?.Invoke(clipboardData);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error handling message: {ex.Message}");
+            }
+        }
+        
+        private void HandleAuthMessage(Dictionary<string, string> message, PairedDevice device)
+        {
+            try
+            {
+                if (message.TryGetValue("device_id", out var deviceId) &&
+                    message.TryGetValue("device_name", out var deviceName))
+                {
+                    // Verify device
+                    if (deviceId != device.DeviceId)
+                    {
+                        Console.WriteLine($"Device ID mismatch: expected {device.DeviceId}, got {deviceId}");
+                        return;
+                    }
+                    
+                    // Update device info
+                    device.DeviceName = deviceName;
+                    _deviceManager.UpdateDeviceLastSeen(deviceId);
+                    
+                    Console.WriteLine($"Authentication successful for {deviceName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error handling auth message: {ex.Message}");
+            }
+        }
+        
+        private void HandleSharedKeyMessage(Dictionary<string, string> message, PairedDevice device)
+        {
+            try
+            {
+                if (message.TryGetValue("shared_key", out var sharedKey) &&
+                    message.TryGetValue("request_id", out var requestId))
+                {
+                    Console.WriteLine($"Received shared key from {device.DeviceName}. Key length: {sharedKey.Length}");
+                    
+                    // Check key validity
+                    try
+                    {
+                        byte[] keyBytes = Convert.FromBase64String(sharedKey);
+                        Console.WriteLine($"Decoded key length: {keyBytes.Length} bytes");
+                        
+                        // AES requires key size of 16, 24, or 32 bytes (128, 192, or 256 bits)
+                        if (keyBytes.Length != 16 && keyBytes.Length != 24 && keyBytes.Length != 32)
+                        {
+                            Console.WriteLine($"Invalid key size: {keyBytes.Length} bytes. Must be 16, 24, or 32 bytes.");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error validating key: {ex.Message}");
+                        return;
+                    }
+                    
+                    // Update the shared key
+                    device.SharedKey = sharedKey;
+                    _deviceManager.AddOrUpdateDevice(device);
+                    
+                    Console.WriteLine($"Saved shared key for {device.DeviceName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error handling shared key message: {ex.Message}");
             }
         }
         
@@ -324,59 +612,176 @@ namespace OpenRelay.Services
                 
                 try
                 {
+                    // First try to parse as a dictionary for control messages
                     var message = JsonConvert.DeserializeObject<Dictionary<string, string>>(e.Data);
                     
-                    if (message == null)
+                    if (message != null && message.TryGetValue("type", out var type))
                     {
-                        return;
-                    }
-                    
-                    if (message.TryGetValue("type", out var type) && type == "auth")
-                    {
-                        // Handle authentication
-                        if (message.TryGetValue("deviceId", out var deviceId) && 
-                            message.TryGetValue("signature", out var signature))
+                        switch (type)
                         {
-                            // Verify device
-                            var device = NetworkService._deviceManager.GetDeviceById(deviceId);
-                            if (device != null && 
-                                NetworkService._encryptionService.VerifySignature(deviceId, signature, device.PublicKey))
-                            {
-                                _connectedDevice = device;
+                            case "auth":
+                                HandleAuthMessage(message);
+                                break;
                                 
-                                // Send acknowledgment
-                                Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
-                                    { "type", "auth_success" },
-                                    { "deviceId", NetworkService._deviceId }
-                                }));
+                            case "pairing_request":
+                                HandlePairingRequest(message);
+                                break;
                                 
-                                return;
-                            }
+                            default:
+                                // If the device is connected, pass the message to the network service
+                                if (_connectedDevice != null)
+                                {
+                                    NetworkService.HandleMessage(e.Data, _connectedDevice);
+                                }
+                                else
+                                {
+                                    // Not authenticated
+                                    Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                                        { "type", "error" },
+                                        { "error", "not_authenticated" }
+                                    }));
+                                }
+                                break;
                         }
-                        
-                        // Authentication failed
-                        Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
-                            { "type", "auth_failed" },
-                            { "reason", "Invalid credentials" }
-                        }));
-                        
-                        // Close connection
-                        Context.WebSocket.Close(CloseStatusCode.PolicyViolation, "Authentication failed");
-                    }
-                    else if (_connectedDevice != null)
-                    {
-                        // Handle other messages
-                        NetworkService.HandleMessage(e.Data, _connectedDevice);
                     }
                     else
                     {
-                        // Not authenticated
-                        Context.WebSocket.Close(CloseStatusCode.PolicyViolation, "Not authenticated");
+                        // If the device is connected, pass the message to the network service
+                        if (_connectedDevice != null)
+                        {
+                            NetworkService.HandleMessage(e.Data, _connectedDevice);
+                        }
+                        else
+                        {
+                            // Not authenticated
+                            Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                                { "type", "error" },
+                                { "error", "not_authenticated" }
+                            }));
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Error handling WebSocket message: {ex.Message}");
+                }
+            }
+            
+            private void HandleAuthMessage(Dictionary<string, string> message)
+            {
+                try
+                {
+                    if (message.TryGetValue("device_id", out var deviceId) &&
+                        message.TryGetValue("device_name", out var deviceName))
+                    {
+                        // Check if this is a known device
+                        var device = NetworkService._deviceManager.GetDeviceById(deviceId);
+                        if (device != null)
+                        {
+                            // Store the device for this connection
+                            _connectedDevice = device;
+                            
+                            // Update device info
+                            device.DeviceName = deviceName;
+                            
+                            // Update IP address if it changed
+                            if (Context.UserEndPoint != null && Context.UserEndPoint is IPEndPoint ipEndPoint)
+                            {
+                                device.IpAddress = ipEndPoint.Address.ToString();
+                            }
+                            
+                            NetworkService._deviceManager.UpdateDeviceLastSeen(deviceId);
+                            
+                            // Send authentication success
+                            Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                                { "type", "auth_success" },
+                                { "device_id", NetworkService._deviceId },
+                                { "device_name", NetworkService._deviceName }
+                            }));
+                            
+                            Console.WriteLine($"Authentication successful for {deviceName}");
+                            return;
+                        }
+                    }
+                    
+                    // Authentication failed
+                    Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                        { "type", "auth_failed" },
+                        { "reason", "device_not_paired" }
+                    }));
+                    
+                    Console.WriteLine("Authentication failed: device not paired");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error handling auth message: {ex.Message}");
+                    
+                    // Authentication failed
+                    Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                        { "type", "auth_failed" },
+                        { "reason", "internal_error" }
+                    }));
+                }
+            }
+            
+            private void HandlePairingRequest(Dictionary<string, string> message)
+            {
+                try
+                {
+                    if (message.TryGetValue("device_id", out var deviceId) &&
+                        message.TryGetValue("device_name", out var deviceName) &&
+                        message.TryGetValue("request_id", out var requestId))
+                    {
+                        Console.WriteLine($"Received pairing request from {deviceName} ({deviceId})");
+                        
+                        // Get IP address
+                        string ipAddress = "unknown";
+                        if (Context.UserEndPoint != null && Context.UserEndPoint is IPEndPoint ipEndPoint)
+                        {
+                            ipAddress = ipEndPoint.Address.ToString();
+                        }
+                        
+                        // Handle the pairing request
+                        bool accepted = NetworkService._deviceManager.HandlePairingRequest(
+                            deviceId, deviceName, ipAddress, NetworkService._port);
+                        
+                        // Send the response
+                        var response = new Dictionary<string, string> {
+                            { "type", "pairing_response" },
+                            { "request_id", requestId },
+                            { "status", accepted ? "accepted" : "declined" },
+                            { "device_id", NetworkService._deviceId },
+                            { "device_name", NetworkService._deviceName }
+                        };
+                        
+                        Send(JsonConvert.SerializeObject(response));
+                        
+                        Console.WriteLine($"Pairing request {(accepted ? "accepted" : "declined")}");
+                    }
+                    else
+                    {
+                        // Invalid request
+                        Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                            { "type", "pairing_response" },
+                            { "request_id", message.TryGetValue("request_id", out var reqId) ? reqId : "unknown" },
+                            { "status", "declined" },
+                            { "reason", "invalid_request" }
+                        }));
+                        
+                        Console.WriteLine("Invalid pairing request");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error handling pairing request: {ex.Message}");
+                    
+                    // Pairing failed
+                    Send(JsonConvert.SerializeObject(new Dictionary<string, string> {
+                        { "type", "pairing_response" },
+                        { "request_id", message.TryGetValue("request_id", out var reqId) ? reqId : "unknown" },
+                        { "status", "declined" },
+                        { "reason", "internal_error" }
+                    }));
                 }
             }
             
