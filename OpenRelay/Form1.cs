@@ -17,7 +17,7 @@ namespace OpenRelay
         private ClipboardMonitorService clipboardMonitor;
         private DeviceManager deviceManager;
         private EncryptionService encryptionService;
-        private NetworkService networkService;
+        private SimpleNetworkService networkService;
         
         // Flag to prevent clipboard loops
         private bool isUpdatingClipboard = false;
@@ -79,7 +79,7 @@ namespace OpenRelay
                 encryptionService = new EncryptionService();
         
                 // Start network service
-                networkService = new NetworkService(deviceManager, encryptionService);
+                networkService = new SimpleNetworkService(deviceManager);
         
                 // Finally, start clipboard monitoring
                 StartClipboardMonitoring();
