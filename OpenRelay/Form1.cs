@@ -25,6 +25,9 @@ namespace OpenRelay
         {
             InitializeComponent();
             
+            // Enable better DPI scaling
+            this.AutoScaleMode = AutoScaleMode.Dpi;
+            
             // Set up the system tray icon
             SetupTrayIcon();
             

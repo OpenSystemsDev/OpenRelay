@@ -11,304 +11,324 @@ namespace OpenRelay.UI
         private readonly DeviceManager _deviceManager;
         private readonly string _localDeviceId;
         private readonly string _publicKey;
-
+        
         public PairingForm(DeviceManager deviceManager, string localDeviceId, string publicKey)
         {
             InitializeComponent();
+            
+            // Enable better DPI scaling
+            this.AutoScaleMode = AutoScaleMode.Dpi;
+            
             _deviceManager = deviceManager;
             _localDeviceId = localDeviceId;
             _publicKey = publicKey;
-
+            
             InitializeUI();
         }
-
+        
         private void InitializeUI()
         {
-            // Setup form - allow resizing and calculate adaptive size
+            // Setup form
             this.Text = "Pair New Device";
-            this.FormBorderStyle = FormBorderStyle.Sizable;
-            this.MaximizeBox = true;
-            this.MinimizeBox = true;
+            this.ClientSize = new Size(550, 550);
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.MinimumSize = new Size(550, 500);
-
-            // Set initial size based on screen resolution
-            Screen currentScreen = Screen.FromControl(this);
-            int width = Math.Min(700, (int)(currentScreen.WorkingArea.Width * 0.6));
-            int height = Math.Min(600, (int)(currentScreen.WorkingArea.Height * 0.7));
-            this.Size = new Size(width, height);
-
-            // Create a panel to allow scrolling if form gets too small
-            var mainPanel = new Panel
+            
+            // Use TableLayoutPanel for better scaling
+            var mainLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                AutoScroll = true
+                ColumnCount = 1,
+                RowCount = 3,
+                Padding = new Padding(10),
             };
-            this.Controls.Add(mainPanel);
-
+            
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 35));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 10));
+            
             // My Device section
             var myDeviceGroupBox = new GroupBox
             {
                 Text = "This Device",
-                Dock = DockStyle.Top,
-                Height = 160,
-                Padding = new Padding(10)
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                Margin = new Padding(0, 0, 0, 10)
             };
-
+            
+            var myDeviceLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 4,
+                ColumnStyles = 
+                {
+                    new ColumnStyle(SizeType.Absolute, 100),
+                    new ColumnStyle(SizeType.Percent, 100),
+                    new ColumnStyle(SizeType.Absolute, 80)
+                }
+            };
+            
+            // Row 0: ID
             var idLabel = new Label
             {
                 Text = "Device ID:",
-                Location = new Point(15, 30),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var idTextBox = new TextBox
             {
                 Text = _localDeviceId,
-                Location = new Point(120, 27),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 170,
+                Dock = DockStyle.Fill,
                 ReadOnly = true
             };
-
+            
             var copyIdButton = new Button
             {
                 Text = "Copy",
-                Location = new Point(width - 120, 25),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Width = 70
+                Dock = DockStyle.Fill
             };
             copyIdButton.Click += (s, e) => Clipboard.SetText(_localDeviceId);
-
+            
+            myDeviceLayout.Controls.Add(idLabel, 0, 0);
+            myDeviceLayout.Controls.Add(idTextBox, 1, 0);
+            myDeviceLayout.Controls.Add(copyIdButton, 2, 0);
+            
+            // Row 1: Public Key
             var keyLabel = new Label
             {
                 Text = "Public Key:",
-                Location = new Point(15, 65),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var keyTextBox = new TextBox
             {
                 Text = _publicKey,
-                Location = new Point(120, 62),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 170,
-                Height = 50,
+                Dock = DockStyle.Fill,
                 Multiline = true,
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Vertical
             };
-
+            
             var copyKeyButton = new Button
             {
                 Text = "Copy",
-                Location = new Point(width - 120, 60),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Width = 70
+                Dock = DockStyle.Fill
             };
             copyKeyButton.Click += (s, e) => Clipboard.SetText(_publicKey);
-
+            
+            myDeviceLayout.Controls.Add(keyLabel, 0, 1);
+            myDeviceLayout.Controls.Add(keyTextBox, 1, 1);
+            myDeviceLayout.Controls.Add(copyKeyButton, 2, 1);
+            
+            // Row 2-3: Info 
             var qrInfoLabel = new Label
             {
                 Text = "Share this information with the device you want to pair with.",
-                Location = new Point(120, 120),
-                AutoSize = true
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
             };
-
-            myDeviceGroupBox.Controls.AddRange(new Control[]
-            {
-                idLabel, idTextBox, copyIdButton,
-                keyLabel, keyTextBox, copyKeyButton,
-                qrInfoLabel
-            });
-
+            
+            myDeviceLayout.Controls.Add(qrInfoLabel, 1, 3);
+            
+            // Set row heights
+            myDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            myDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            myDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
+            myDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            
+            myDeviceGroupBox.Controls.Add(myDeviceLayout);
+            
             // Add New Device section
             var addDeviceGroupBox = new GroupBox
             {
                 Text = "Add Remote Device",
-                Dock = DockStyle.Top,
-                Height = 240,
-                Top = 170,
-                Padding = new Padding(10)
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                Margin = new Padding(0, 0, 0, 10)
             };
-
+            
+            var addDeviceLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 6,
+                ColumnStyles = 
+                {
+                    new ColumnStyle(SizeType.Absolute, 100),
+                    new ColumnStyle(SizeType.Percent, 100),
+                }
+            };
+            
+            // Add controls with proper positioning
             var remoteNameLabel = new Label
             {
                 Text = "Device Name:",
-                Location = new Point(15, 30),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remoteNameTextBox = new TextBox
             {
-                Location = new Point(120, 27),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150
+                Dock = DockStyle.Fill
             };
-
+            
             var remoteIdLabel = new Label
             {
                 Text = "Device ID:",
-                Location = new Point(15, 65),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remoteIdTextBox = new TextBox
             {
-                Location = new Point(120, 62),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150
+                Dock = DockStyle.Fill
             };
-
+            
             var remotePlatformLabel = new Label
             {
                 Text = "Platform:",
-                Location = new Point(15, 100),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remotePlatformComboBox = new ComboBox
             {
-                Location = new Point(120, 97),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150,
+                Dock = DockStyle.Fill,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
             remotePlatformComboBox.Items.AddRange(new string[] { "Android", "Windows", "iOS", "macOS" });
             remotePlatformComboBox.SelectedIndex = 0;
-
+            
             var remoteIpLabel = new Label
             {
                 Text = "IP Address:",
-                Location = new Point(15, 135),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remoteIpTextBox = new TextBox
             {
-                Location = new Point(120, 132),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150
+                Dock = DockStyle.Fill
             };
-
+            
             var remotePortLabel = new Label
             {
                 Text = "Port:",
-                Location = new Point(15, 170),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remotePortTextBox = new TextBox
             {
-                Location = new Point(120, 167),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150,
+                Dock = DockStyle.Fill,
                 Text = "9876"
             };
-
+            
             var remoteKeyLabel = new Label
             {
                 Text = "Public Key:",
-                Location = new Point(15, 205),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
                 AutoSize = true
             };
-
+            
             var remoteKeyTextBox = new TextBox
             {
-                Location = new Point(120, 202),
-                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
-                Width = width - 150,
-                Height = 50,
+                Dock = DockStyle.Fill,
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical
             };
-
-            addDeviceGroupBox.Controls.AddRange(new Control[]
+            
+            // Row heights for device form
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            addDeviceLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            
+            // Add controls to layout
+            addDeviceLayout.Controls.Add(remoteNameLabel, 0, 0);
+            addDeviceLayout.Controls.Add(remoteNameTextBox, 1, 0);
+            addDeviceLayout.Controls.Add(remoteIdLabel, 0, 1);
+            addDeviceLayout.Controls.Add(remoteIdTextBox, 1, 1);
+            addDeviceLayout.Controls.Add(remotePlatformLabel, 0, 2);
+            addDeviceLayout.Controls.Add(remotePlatformComboBox, 1, 2);
+            addDeviceLayout.Controls.Add(remoteIpLabel, 0, 3);
+            addDeviceLayout.Controls.Add(remoteIpTextBox, 1, 3);
+            addDeviceLayout.Controls.Add(remotePortLabel, 0, 4);
+            addDeviceLayout.Controls.Add(remotePortTextBox, 1, 4);
+            addDeviceLayout.Controls.Add(remoteKeyLabel, 0, 5);
+            addDeviceLayout.Controls.Add(remoteKeyTextBox, 1, 5);
+            
+            addDeviceGroupBox.Controls.Add(addDeviceLayout);
+            
+            // Buttons panel
+            var buttonsPanel = new FlowLayoutPanel
             {
-                remoteNameLabel, remoteNameTextBox,
-                remoteIdLabel, remoteIdTextBox,
-                remotePlatformLabel, remotePlatformComboBox,
-                remoteIpLabel, remoteIpTextBox,
-                remotePortLabel, remotePortTextBox,
-                remoteKeyLabel, remoteKeyTextBox
-            });
-
-            // Buttons panel with fixed padding from bottom
-            var buttonPanel = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 50
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false
             };
-
-            var cancelButton = new Button
-            {
-                Text = "Cancel",
-                DialogResult = DialogResult.Cancel,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Width = 90,
-                Height = 30
-            };
-            cancelButton.Location = new Point(buttonPanel.Width - 200, 10);
-
+            
             var addButton = new Button
             {
                 Text = "Add Device",
                 DialogResult = DialogResult.OK,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Width = 90,
-                Height = 30
+                AutoSize = true,
+                Margin = new Padding(10, 0, 0, 0)
             };
-            addButton.Location = new Point(buttonPanel.Width - 100, 10);
-
-            addButton.Click += (s, e) =>
-            {
-                try
-                {
+            addButton.Click += (s, e) => {
+                try {
                     // Create and add the device
                     var device = new PairedDevice
                     {
                         DeviceId = remoteIdTextBox.Text,
                         DeviceName = remoteNameTextBox.Text,
-                        Platform = remotePlatformComboBox.SelectedItem?.ToString() ?? "Windows",
+                        Platform = remotePlatformComboBox.SelectedItem.ToString(),
                         IpAddress = remoteIpTextBox.Text,
                         Port = int.Parse(remotePortTextBox.Text),
                         PublicKey = remoteKeyTextBox.Text,
                         LastSeen = DateTime.Now
                     };
-
+                    
                     _deviceManager.AddOrUpdateDevice(device);
-                    MessageBox.Show($"Device '{device.DeviceName}' added successfully!", "Success",
+                    MessageBox.Show($"Device '{device.DeviceName}' added successfully!", "Success", 
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error adding device: {ex.Message}", "Error",
+                catch (Exception ex) {
+                    MessageBox.Show($"Error adding device: {ex.Message}", "Error", 
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                     this.DialogResult = DialogResult.None;
                 }
             };
-
-            buttonPanel.Controls.AddRange(new Control[] { cancelButton, addButton });
-
-            // Handle resize for button panel
-            this.Resize += (s, e) =>
+            
+            var cancelButton = new Button
             {
-                cancelButton.Location = new Point(buttonPanel.Width - 200, 10);
-                addButton.Location = new Point(buttonPanel.Width - 100, 10);
+                Text = "Cancel",
+                DialogResult = DialogResult.Cancel,
+                AutoSize = true
             };
-
-            // Add all controls to form
-            mainPanel.Controls.AddRange(new Control[]
-            {
-                myDeviceGroupBox,
-                addDeviceGroupBox
-            });
-            this.Controls.Add(buttonPanel);
-
+            
+            buttonsPanel.Controls.Add(addButton);
+            buttonsPanel.Controls.Add(cancelButton);
+            
+            // Add everything to the main layout
+            mainLayout.Controls.Add(myDeviceGroupBox, 0, 0);
+            mainLayout.Controls.Add(addDeviceGroupBox, 0, 1);
+            mainLayout.Controls.Add(buttonsPanel, 0, 2);
+            
+            // Add layout to form
+            this.Controls.Add(mainLayout);
+            
             this.AcceptButton = addButton;
             this.CancelButton = cancelButton;
         }
-
+        
         private void InitializeComponent()
         {
             this.SuspendLayout();
