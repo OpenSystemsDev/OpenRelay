@@ -72,7 +72,7 @@ namespace OpenRelay
                 // Then encryption service (depends on device manager)
                 encryptionService = new EncryptionService(deviceManager);
                 
-                // Start network service
+                // Initialize network service
                 networkService = new NetworkService(deviceManager, encryptionService);
                 
                 // Finally, start clipboard monitoring

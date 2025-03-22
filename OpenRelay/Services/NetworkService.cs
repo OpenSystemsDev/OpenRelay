@@ -88,7 +88,7 @@ namespace OpenRelay.Services
             }
         }
         
-        private Task RegisterServiceAsync()
+        private async Task RegisterServiceAsync()
         {
             try
             {
@@ -96,12 +96,10 @@ namespace OpenRelay.Services
                 // In production, you'd want to use a native Windows API for this
                 // For demo purposes, we'll rely on discovery only
                 Console.WriteLine("Service registration not implemented for Windows");
-                return Task.CompletedTask;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error registering service: {ex.Message}");
-                return Task.FromException(ex);
             }
         }
         
@@ -111,11 +109,12 @@ namespace OpenRelay.Services
             {
                 // Discover other OpenRelay instances on the network
                 var results = await ZeroconfResolver.ResolveAsync(SERVICE_NAME);
-        
+                
                 foreach (var result in results)
                 {
+                    // Zeroconf results don't include port directly, we'll use our default port
                     Console.WriteLine($"Found service: {result.DisplayName} at {result.IPAddress}");
-        
+                    
                     // Check if this is a known device
                     var deviceInfo = _deviceManager.GetDeviceByIp(result.IPAddress);
                     if (deviceInfo != null)
@@ -124,20 +123,20 @@ namespace OpenRelay.Services
                         ConnectToDevice(deviceInfo);
                     }
                 }
-        
+                
                 // Continue listening for new services
                 var subscription = ZeroconfResolver.ResolveContinuous(
                     SERVICE_NAME,
-                    TimeSpan.FromSeconds(5),  // Timeout
-                    1,                         // Retries
-                    1                          // Max services per endpoint
+                    TimeSpan.FromSeconds(60),  // Timeout
+                    2,                   // Retries
+                    100       // Max services per endpoint
                 );
-        
+                
                 // Subscribe to the results
                 subscription.Subscribe(result => 
                 {
                     Console.WriteLine($"Found service: {result.DisplayName} at {result.IPAddress}");
-        
+                    
                     // Check if this is a known device
                     var deviceInfo = _deviceManager.GetDeviceByIp(result.IPAddress);
                     if (deviceInfo != null)
