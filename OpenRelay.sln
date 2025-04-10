@@ -1,6 +1,8 @@
-﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenRelay", "OpenRelay\OpenRelay.csproj", "{E2E61FDB-60B0-4B2B-BB19-1F37D86AB3B1}"
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35931.197
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenRelay", "OpenRelay\OpenRelay.csproj", "{786BD4C9-9BA3-4726-8C56-43F3CF357769}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -8,9 +10,15 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{E2E61FDB-60B0-4B2B-BB19-1F37D86AB3B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{E2E61FDB-60B0-4B2B-BB19-1F37D86AB3B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{E2E61FDB-60B0-4B2B-BB19-1F37D86AB3B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{E2E61FDB-60B0-4B2B-BB19-1F37D86AB3B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{786BD4C9-9BA3-4726-8C56-43F3CF357769}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{786BD4C9-9BA3-4726-8C56-43F3CF357769}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{786BD4C9-9BA3-4726-8C56-43F3CF357769}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{786BD4C9-9BA3-4726-8C56-43F3CF357769}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {98D02AA1-412B-4AF3-A48C-69FF837F2BD1}
 	EndGlobalSection
 EndGlobal

@@ -1,4 +1,5 @@
 ﻿using System;
+using Newtonsoft.Json;
 
 namespace OpenRelay.Models
 {
@@ -11,23 +12,23 @@ namespace OpenRelay.Models
         /// Format of the clipboard data (e.g., "text/plain", "image/png")
         /// </summary>
         public string Format { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// Text content if Format is text/plain
         /// </summary>
         public string? TextData { get; set; }
-        
+
         /// <summary>
         /// Binary data for non-text formats
         /// </summary>
         public byte[]? BinaryData { get; set; }
-        
+
         /// <summary>
         /// Unix timestamp of when this data was copied
         /// </summary>
         public long Timestamp { get; set; }
     }
-    
+
     /// <summary>
     /// Represents a device paired with this application
     /// </summary>
@@ -37,76 +38,58 @@ namespace OpenRelay.Models
         /// Unique identifier for the device
         /// </summary>
         public string DeviceId { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// User-friendly name of the device
         /// </summary>
         public string DeviceName { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// Platform (windows, android)
         /// </summary>
         public string Platform { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// IP address of the device on the local network
         /// </summary>
         public string IpAddress { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// Port for communication
         /// </summary>
         public int Port { get; set; }
-        
+
         /// <summary>
-        /// Shared encryption key (AES-256) for this device
+        /// Shared encryption key for this device
         /// </summary>
         public string SharedKey { get; set; } = string.Empty;
-        
+
         /// <summary>
         /// Last time this device was seen
         /// </summary>
         public DateTime LastSeen { get; set; }
-        
+
         public override string ToString()
         {
             return $"{DeviceName} ({IpAddress})";
         }
     }
-    
+
     /// <summary>
-    /// Message format for clipboard updates
+    /// JSON structure for clipboard data from Rust
     /// </summary>
-    public class ClipboardMessage
+    internal class JsonClipboardData
     {
-        /// <summary>
-        /// Message type (e.g., "clipboard_update", "pairing_request", "pairing_response")
-        /// </summary>
-        public string Type { get; set; } = string.Empty;
-        
-        /// <summary>
-        /// Device sending this message
-        /// </summary>
-        public string DeviceId { get; set; } = string.Empty;
-        
-        /// <summary>
-        /// Device name for display purposes
-        /// </summary>
-        public string DeviceName { get; set; } = string.Empty;
-        
-        /// <summary>
-        /// Unix timestamp
-        /// </summary>
-        public long Timestamp { get; set; }
-        
-        /// <summary>
-        /// Format of the data (for clipboard updates)
-        /// </summary>
+        [JsonProperty("format")]
         public string Format { get; set; } = string.Empty;
-        
-        /// <summary>
-        /// Encrypted data content (Base64 encoded)
-        /// </summary>
-        public string Data { get; set; } = string.Empty;
+
+        [JsonProperty("text_data")]
+        public string? TextData { get; set; }
+
+        [JsonProperty("binary_length")]
+        public int BinaryLength { get; set; }
+
+        [JsonProperty("timestamp")]
+        public long Timestamp { get; set; }
     }
 }

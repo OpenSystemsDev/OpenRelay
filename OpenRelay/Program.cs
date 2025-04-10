@@ -16,15 +16,36 @@ namespace OpenRelay
             {
                 SetProcessDPIAware();
             }
-            
+
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            
+
+            // Initialize the Rust library
+            int result = NativeMethods.openrelay_init();
+            if (result != 0)
+            {
+                MessageBox.Show("Failed to initialize OpenRelay core library.", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Start the OpenRelay services
+            result = NativeMethods.openrelay_start();
+            if (result != 0)
+            {
+                MessageBox.Show("Failed to start OpenRelay services.", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             // Start the application with our main form
             Application.Run(new Form1());
+
+            // Cleanup on exit
+            NativeMethods.openrelay_cleanup();
         }
-        
+
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
     }
