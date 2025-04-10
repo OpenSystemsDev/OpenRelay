@@ -1,4 +1,4 @@
-﻿# OpenRelay: Cross-Platform Clipboard Sync
+# OpenRelay: Cross-Platform Clipboard Sync
 
 OpenRelay is a secure clipboard synchronization tool that allows you to seamlessly share clipboard contents between your devices. Currently supporting Windows-to-Windows clipboard synchronization with planned support for Android.
 
@@ -21,7 +21,7 @@ OpenRelay uses a hybrid architecture:
 
 - .NET 9.0 or later
 - Windows 10/11 (as of now)
-- The Rust-based `openrelay_core.dll`
+- The Rust-based [`openrelay_core.dll`](https://github.com/Awe03/OpenRelay-core)
 
 ## Building from Source
 1. Clone this repository
