@@ -145,35 +145,62 @@ namespace OpenRelay.Services
         public async Task<bool> SendPairingRequestAsync(string ipAddress, int port = 9876)
         {
             return await Task.Run(() => {
-                int result = NativeMethods.openrelay_send_pairing_request(ipAddress, port);
-                return result > 0; // 1 = success, 0 = declined, negative = error
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"Sending pairing request to {ipAddress}:{port}");
+
+                    // Validate IP address
+                    if (string.IsNullOrEmpty(ipAddress))
+                    {
+                        System.Diagnostics.Debug.WriteLine("IP address is null or empty");
+                        return false;
+                    }
+
+                    int result = NativeMethods.openrelay_send_pairing_request(ipAddress, port);
+                    System.Diagnostics.Debug.WriteLine($"Pairing request result: {result}");
+                    return result > 0; // 1 = success, 0 = declined, negative = error
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Exception in SendPairingRequestAsync: {ex}");
+                    return false;
+                }
             });
         }
 
         // Callback methods for Rust
         private int OnPairingRequest(IntPtr deviceIdPtr, IntPtr deviceNamePtr, IntPtr ipAddressPtr, int port, IntPtr requestIdPtr)
         {
-            string deviceId = Marshal.PtrToStringAnsi(deviceIdPtr) ?? string.Empty;
-            string deviceName = Marshal.PtrToStringAnsi(deviceNamePtr) ?? string.Empty;
-            string ipAddress = Marshal.PtrToStringAnsi(ipAddressPtr) ?? string.Empty;
-            string requestId = Marshal.PtrToStringAnsi(requestIdPtr) ?? string.Empty;
-
-            Console.WriteLine($"Pairing request from {deviceName} ({deviceId}) at {ipAddress}:{port}");
-
-            // If already paired, accept automatically
-            if (IsPairedDevice(deviceId))
+            try
             {
-                return 1; // Accept
+                // More carefully convert pointers to strings using UTF-8
+                string deviceId = (deviceIdPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(deviceIdPtr) : string.Empty;
+                string deviceName = (deviceNamePtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(deviceNamePtr) : string.Empty;
+                string ipAddress = (ipAddressPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(ipAddressPtr) : string.Empty;
+                string requestId = (requestIdPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(requestIdPtr) : string.Empty;
+
+                System.Diagnostics.Debug.WriteLine($"Pairing request from {deviceName} ({deviceId}) at {ipAddress}:{port}");
+
+                // If already paired, accept automatically
+                if (IsPairedDevice(deviceId))
+                {
+                    return 1; // Accept
+                }
+
+                // Create event args
+                var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, requestId);
+
+                // Raise event
+                PairingRequestReceived?.Invoke(this, args);
+
+                // Return 1 if accepted, 0 if not
+                return args.Accepted ? 1 : 0;
             }
-
-            // Create event args
-            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, requestId);
-
-            // Raise event
-            PairingRequestReceived?.Invoke(this, args);
-
-            // Return 1 if accepted, 0 if not
-            return args.Accepted ? 1 : 0;
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error in pairing request callback: {ex}");
+                return 0; // Decline on error
+            }
         }
 
         private void OnDeviceAdded(IntPtr deviceIdPtr, IntPtr deviceNamePtr, IntPtr ipAddressPtr, int port)

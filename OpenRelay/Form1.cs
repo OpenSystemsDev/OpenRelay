@@ -33,25 +33,50 @@ namespace OpenRelay
             this.FormBorderStyle = FormBorderStyle.FixedToolWindow;
             this.Hide();
 
+            // Test P/Invoke functionality
+            TestDll.TestPInvoke();
+
             // Initialize services
             try
             {
+                System.Diagnostics.Debug.WriteLine("Initializing services in Form1...");
+
+                // Check if the DLL exists in the output directory
+                string dllPath = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "openrelay_core.dll");
+
+                if (!System.IO.File.Exists(dllPath))
+                {
+                    string message = $"The Rust DLL was not found at: {dllPath}\n" +
+                                     "Please make sure to copy the DLL to the application directory.";
+                    System.Diagnostics.Debug.WriteLine(message);
+                    MessageBox.Show(message, "DLL Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    UpdateStatus("DLL Missing");
+                    return;
+                }
+
                 // Initialize device manager first
                 deviceManager = new DeviceManagerService();
                 deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
                 deviceManager.DeviceAdded += DeviceManager_DeviceAdded;
                 deviceManager.DeviceRemoved += DeviceManager_DeviceRemoved;
 
+                System.Diagnostics.Debug.WriteLine("Device manager initialized");
+
                 // Initialize clipboard service
                 clipboardService = new ClipboardService();
                 clipboardService.ClipboardDataReceived += ClipboardService_ClipboardDataReceived;
+
+                System.Diagnostics.Debug.WriteLine("Clipboard service initialized");
 
                 // Update status
                 UpdateStatus("Connected");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error initializing services: {ex.Message}", "Error",
+                System.Diagnostics.Debug.WriteLine($"Error in Form1 constructor: {ex}");
+                MessageBox.Show($"Error initializing services: {ex.Message}\n\nStack trace: {ex.StackTrace}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 UpdateStatus("Error");
             }

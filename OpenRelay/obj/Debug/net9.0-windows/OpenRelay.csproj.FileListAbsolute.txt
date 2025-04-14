@@ -20,3 +20,4 @@ D:\Code\Projects\OpenRelay\OpenRelay\obj\Debug\net9.0-windows\refint\OpenRelay.d
 D:\Code\Projects\OpenRelay\OpenRelay\obj\Debug\net9.0-windows\OpenRelay.pdb
 D:\Code\Projects\OpenRelay\OpenRelay\obj\Debug\net9.0-windows\OpenRelay.genruntimeconfig.cache
 D:\Code\Projects\OpenRelay\OpenRelay\obj\Debug\net9.0-windows\ref\OpenRelay.dll
+D:\Code\Projects\OpenRelay\OpenRelay\obj\Debug\net9.0-windows\OpenRelay.sourcelink.json

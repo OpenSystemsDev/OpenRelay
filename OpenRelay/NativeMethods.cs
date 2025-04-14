@@ -1,23 +1,25 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace OpenRelay
 {
     internal static class NativeMethods
     {
+        // Explicitly specify the DLL path and name
         private const string DllName = "openrelay_core";
 
-        // Callback delegates
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        // Callback delegates with explicit marshaling
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public delegate void ClipboardChangedCallback(IntPtr jsonData, IntPtr binaryData, UIntPtr binaryLength);
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public delegate int PairingRequestCallback(IntPtr deviceId, IntPtr deviceName, IntPtr ipAddress, int port, IntPtr requestId);
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public delegate void DeviceAddedCallback(IntPtr deviceId, IntPtr deviceName, IntPtr ipAddress, int port);
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public delegate void DeviceRemovedCallback(IntPtr deviceId);
 
         // Initialize the library
@@ -56,13 +58,15 @@ namespace OpenRelay
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr openrelay_get_paired_devices();
 
-        // Send pairing request
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int openrelay_send_pairing_request(string ipAddress, int port);
+        // Send pairing request (explicitly specify string marshaling)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int openrelay_send_pairing_request(
+            [MarshalAs(UnmanagedType.LPStr)] string ipAddress, int port);
 
-        // Remove paired device
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int openrelay_remove_device(string deviceId);
+        // Remove paired device (explicitly specify string marshaling)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int openrelay_remove_device(
+            [MarshalAs(UnmanagedType.LPStr)] string deviceId);
 
         // Cleanup and shut down
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -73,14 +77,47 @@ namespace OpenRelay
         public static extern void openrelay_free_string(IntPtr ptr);
 
         // Helper method to convert an IntPtr to a string and free the memory
+        // Rust likely uses UTF-8, so we'll try both UTF-8 and ANSI
         public static string PtrToStringAndFree(IntPtr ptr)
         {
             if (ptr == IntPtr.Zero)
                 return string.Empty;
 
-            string result = Marshal.PtrToStringAnsi(ptr);
-            openrelay_free_string(ptr);
-            return result;
+            try
+            {
+                // Try UTF-8 first
+                string result = PtrToStringUTF8(ptr);
+                openrelay_free_string(ptr);
+                return result;
+            }
+            catch
+            {
+                try
+                {
+                    // Fall back to ANSI
+                    string result = Marshal.PtrToStringAnsi(ptr);
+                    openrelay_free_string(ptr);
+                    return result;
+                }
+                catch
+                {
+                    // Last resort - try not to free if it fails
+                    return string.Empty;
+                }
+            }
+        }
+
+        // Helper for UTF-8 string conversion
+        public static string PtrToStringUTF8(IntPtr ptr)
+        {
+            if (ptr == IntPtr.Zero)
+                return string.Empty;
+
+            int len = 0;
+            while (Marshal.ReadByte(ptr, len) != 0) len++;
+            byte[] buffer = new byte[len];
+            Marshal.Copy(ptr, buffer, 0, buffer.Length);
+            return Encoding.UTF8.GetString(buffer);
         }
     }
 }

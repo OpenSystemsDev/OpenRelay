@@ -21,7 +21,7 @@ OpenRelay uses a hybrid architecture:
 
 - .NET 9.0 or later
 - Windows 10/11 (as of now)
-- The Rust-based `openrelay_core.dll`
+- The Rust-based [`openrelay_core.dll`](https://github.com/Awe03/openrelay-core)
 
 ## Building from Source
 1. Clone this repository
