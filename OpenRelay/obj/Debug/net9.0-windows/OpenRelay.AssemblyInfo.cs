@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("OpenRelay")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+801a0fffc6fda2202888fea36905c0b99a6c7dc3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b0931dbe984ac02d5bc3b504df93424352a25304")]
 [assembly: System.Reflection.AssemblyProductAttribute("OpenRelay")]
 [assembly: System.Reflection.AssemblyTitleAttribute("OpenRelay")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
