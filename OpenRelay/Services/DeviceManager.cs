@@ -147,15 +147,31 @@ namespace OpenRelay.Services
             return await Task.Run(() => {
                 try
                 {
-                    System.Diagnostics.Debug.WriteLine($"Sending pairing request to {ipAddress}:{port}");
-
-                    // Validate IP address
+                    // Validate and normalize IP address
                     if (string.IsNullOrEmpty(ipAddress))
                     {
                         System.Diagnostics.Debug.WriteLine("IP address is null or empty");
                         return false;
                     }
 
+                    // Check if this looks like an IPv4 address and normalize format if needed
+                    if (ipAddress.Contains(".") && !ipAddress.Contains(":"))
+                    {
+                        // Make sure it has all 4 parts
+                        var parts = ipAddress.Split('.');
+                        if (parts.Length == 4)
+                        {
+                            // This looks like a valid IPv4 address
+                            System.Diagnostics.Debug.WriteLine($"Using IPv4 address: {ipAddress}");
+                        }
+                        else if (parts.Length < 4)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"IP address appears incomplete: {ipAddress}");
+                            return false;
+                        }
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"Sending pairing request to {ipAddress}:{port}");
                     int result = NativeMethods.openrelay_send_pairing_request(ipAddress, port);
                     System.Diagnostics.Debug.WriteLine($"Pairing request result: {result}");
                     return result > 0; // 1 = success, 0 = declined, negative = error
@@ -173,11 +189,23 @@ namespace OpenRelay.Services
         {
             try
             {
-                // More carefully convert pointers to strings using UTF-8
-                string deviceId = (deviceIdPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(deviceIdPtr) : string.Empty;
-                string deviceName = (deviceNamePtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(deviceNamePtr) : string.Empty;
-                string ipAddress = (ipAddressPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(ipAddressPtr) : string.Empty;
-                string requestId = (requestIdPtr != IntPtr.Zero) ? NativeMethods.PtrToStringUTF8(requestIdPtr) : string.Empty;
+                // Convert pointers to strings more safely - use the base Marshal methods first
+                string deviceId = "";
+                string deviceName = "";
+                string ipAddress = "";
+                string requestId = "";
+
+                try { deviceId = Marshal.PtrToStringAnsi(deviceIdPtr) ?? string.Empty; }
+                catch { System.Diagnostics.Debug.WriteLine("Failed to convert deviceId"); }
+
+                try { deviceName = Marshal.PtrToStringAnsi(deviceNamePtr) ?? string.Empty; }
+                catch { System.Diagnostics.Debug.WriteLine("Failed to convert deviceName"); }
+
+                try { ipAddress = Marshal.PtrToStringAnsi(ipAddressPtr) ?? string.Empty; }
+                catch { System.Diagnostics.Debug.WriteLine("Failed to convert ipAddress"); }
+
+                try { requestId = Marshal.PtrToStringAnsi(requestIdPtr) ?? string.Empty; }
+                catch { System.Diagnostics.Debug.WriteLine("Failed to convert requestId"); }
 
                 System.Diagnostics.Debug.WriteLine($"Pairing request from {deviceName} ({deviceId}) at {ipAddress}:{port}");
 
@@ -191,7 +219,14 @@ namespace OpenRelay.Services
                 var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, requestId);
 
                 // Raise event
-                PairingRequestReceived?.Invoke(this, args);
+                try
+                {
+                    PairingRequestReceived?.Invoke(this, args);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error in PairingRequestReceived event: {ex}");
+                }
 
                 // Return 1 if accepted, 0 if not
                 return args.Accepted ? 1 : 0;

@@ -105,20 +105,40 @@ namespace OpenRelay
 
         private void DeviceManager_PairingRequestReceived(object sender, PairingRequestEventArgs e)
         {
-            // Need to show UI on the UI thread
-            if (InvokeRequired)
+            try
             {
-                Invoke(new Action<object, PairingRequestEventArgs>(DeviceManager_PairingRequestReceived), sender, e);
-                return;
+                // Need to show UI on the UI thread
+                if (InvokeRequired)
+                {
+                    Invoke(new Action<object, PairingRequestEventArgs>(DeviceManager_PairingRequestReceived), sender, e);
+                    return;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Showing pairing dialog for device {e.DeviceName}");
+
+                // Show pairing request dialog
+                try
+                {
+                    using (var dialog = new PairingRequestDialog(e.DeviceName, e.DeviceId, e.IpAddress))
+                    {
+                        dialog.ShowDialog();
+
+                        // Set the result
+                        e.Accepted = dialog.Accepted;
+                        System.Diagnostics.Debug.WriteLine($"Pairing request {(e.Accepted ? "accepted" : "declined")}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error showing pairing dialog: {ex}");
+                    e.Accepted = false; // Decline on error
+                }
             }
-
-            // Show pairing request dialog
-            using (var dialog = new PairingRequestDialog(e.DeviceName, e.DeviceId, e.IpAddress))
+            catch (Exception ex)
             {
-                dialog.ShowDialog();
-
-                // Set the result
-                e.Accepted = dialog.Accepted;
+                System.Diagnostics.Debug.WriteLine($"Error in PairingRequestReceived: {ex}");
+                // Make sure to set Accepted to some value even on error
+                e.Accepted = false;
             }
         }
 
