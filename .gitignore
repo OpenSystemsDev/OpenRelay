@@ -1,18 +1,18 @@
 # Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
-x64/
-x86/
-[Ww][Ii][Nn]32/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
+OpenRelay/[Dd]ebug/
+OpenRelay/[Dd]ebugPublic/
+OpenRelay/[Rr]elease/
+OpenRelay/[Rr]eleases/
+OpenRelay/x64/
+OpenRelay/x86/
+OpenRelay/[Ww][Ii][Nn]32/
+OpenRelay/[Aa][Rr][Mm]/
+OpenRelay/[Aa][Rr][Mm]64/
+OpenRelay/bld/
+OpenRelay/[Bb]in/
+OpenRelay/[Oo]bj/
+OpenRelay/[Ll]og/
+OpenRelay/[Ll]ogs/
 
 # Visual Studio files
 .vs/
@@ -27,11 +27,6 @@ bld/
 *.publishsettings
 orleans.codegen.cs
 
-# ReSharper
-_ReSharper*/
-*.[Rr]e[Ss]harper
-*.DotSettings.user
-
 # NuGet
 packages/
 *.nupkg
@@ -45,7 +40,3 @@ packages/
 
 # Visual Studio History
 .vshistory/
-
-# JetBrains Rider
-.idea/
-*.sln.iml
