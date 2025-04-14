@@ -50,9 +50,9 @@
         "net9.0-windows7.0": {
           "targetAlias": "net9.0-windows",
           "dependencies": {
-            "Newtonsoft.Json": {
+            "System.Text.Json": {
               "target": "Package",
-              "version": "[13.0.3, )"
+              "version": "[9.0.4, )"
             }
           },
           "imports": [

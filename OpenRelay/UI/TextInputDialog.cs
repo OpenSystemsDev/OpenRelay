@@ -88,13 +88,8 @@ namespace OpenRelay.UI
 
         private void InitializeComponent()
         {
-            SuspendLayout();
-            // 
-            // TextInputDialog
-            // 
-            ClientSize = new Size(305, 240);
-            Name = "TextInputDialog";
-            ResumeLayout(false);
+            this.SuspendLayout();
+            this.ResumeLayout(false);
         }
     }
 }

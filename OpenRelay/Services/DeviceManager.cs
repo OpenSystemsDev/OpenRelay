@@ -1,7 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using Newtonsoft.Json;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
 using OpenRelay.Models;
 
 namespace OpenRelay.Services
@@ -12,16 +13,14 @@ namespace OpenRelay.Services
         public string DeviceName { get; }
         public string IpAddress { get; }
         public int Port { get; }
-        public string RequestId { get; }
         public bool Accepted { get; set; }
 
-        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port, string requestId)
+        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port)
         {
             DeviceId = deviceId;
             DeviceName = deviceName;
             IpAddress = ipAddress;
             Port = port;
-            RequestId = requestId;
             Accepted = false; // Default to not accepted
         }
     }
@@ -36,261 +35,264 @@ namespace OpenRelay.Services
         }
     }
 
-    public class DeviceRemovedEventArgs : EventArgs
-    {
-        public string DeviceId { get; }
-
-        public DeviceRemovedEventArgs(string deviceId)
-        {
-            DeviceId = deviceId;
-        }
-    }
-
-    public class DeviceManagerService : IDisposable
+    /// <summary>
+    /// Manages paired devices and device discovery
+    /// </summary>
+    public class DeviceManager : IDisposable
     {
         // Events
         public event EventHandler<PairingRequestEventArgs>? PairingRequestReceived;
         public event EventHandler<DeviceEventArgs>? DeviceAdded;
         public event EventHandler<DeviceEventArgs>? DeviceUpdated;
-        public event EventHandler<DeviceRemovedEventArgs>? DeviceRemoved;
+        public event EventHandler<string>? DeviceRemoved;
 
-        // Callbacks for the Rust library
-        private NativeMethods.PairingRequestCallback _pairingRequestCallback;
-        private NativeMethods.DeviceAddedCallback _deviceAddedCallback;
-        private NativeMethods.DeviceRemovedCallback _deviceRemovedCallback;
+        // Collection of paired devices
+        private readonly List<PairedDevice> _pairedDevices = new List<PairedDevice>();
 
         // Local device information
-        private string _localDeviceId = string.Empty;
-        private string _localDeviceName = string.Empty;
+        public string LocalDeviceId { get; }
+        public string LocalDeviceName { get; }
 
-        public string LocalDeviceId => _localDeviceId;
-        public string LocalDeviceName => _localDeviceName;
+        // File path for storing paired devices
+        private readonly string _storageFilePath;
 
-        public DeviceManagerService()
+        // Encryption service for generating keys
+        private readonly EncryptionService _encryptionService;
+
+        /// <summary>
+        /// Initialize the device manager
+        /// </summary>
+        public DeviceManager(EncryptionService encryptionService)
         {
-            // Initialize callbacks and keep references to prevent garbage collection
-            _pairingRequestCallback = new NativeMethods.PairingRequestCallback(OnPairingRequest);
-            _deviceAddedCallback = new NativeMethods.DeviceAddedCallback(OnDeviceAdded);
-            _deviceRemovedCallback = new NativeMethods.DeviceRemovedCallback(OnDeviceRemoved);
+            _encryptionService = encryptionService;
 
-            // Register callbacks with the Rust library
-            NativeMethods.openrelay_set_pairing_request_callback(_pairingRequestCallback);
-            NativeMethods.openrelay_set_device_added_callback(_deviceAddedCallback);
-            NativeMethods.openrelay_set_device_removed_callback(_deviceRemovedCallback);
+            // Generate a unique ID for this device if it doesn't exist
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var appFolder = Path.Combine(appData, "OpenRelay");
 
-            // Get local device information
-            InitializeLocalDeviceInfo();
-        }
-
-        private void InitializeLocalDeviceInfo()
-        {
-            IntPtr deviceIdPtr = NativeMethods.openrelay_get_local_device_id();
-            if (deviceIdPtr != IntPtr.Zero)
+            // Create directory if it doesn't exist
+            if (!Directory.Exists(appFolder))
             {
-                _localDeviceId = NativeMethods.PtrToStringAndFree(deviceIdPtr);
+                Directory.CreateDirectory(appFolder);
             }
 
-            IntPtr deviceNamePtr = NativeMethods.openrelay_get_local_device_name();
-            if (deviceNamePtr != IntPtr.Zero)
-            {
-                _localDeviceName = NativeMethods.PtrToStringAndFree(deviceNamePtr);
-            }
-        }
+            _storageFilePath = Path.Combine(appFolder, "paired_devices.json");
 
-        public List<PairedDevice> GetPairedDevices()
-        {
-            var devices = new List<PairedDevice>();
-
-            IntPtr devicesJsonPtr = NativeMethods.openrelay_get_paired_devices();
-            if (devicesJsonPtr != IntPtr.Zero)
+            // Try to load device ID from file if it exists
+            var deviceIdFilePath = Path.Combine(appFolder, "device_id.txt");
+            if (File.Exists(deviceIdFilePath))
             {
-                string devicesJson = NativeMethods.PtrToStringAndFree(devicesJsonPtr);
-                if (!string.IsNullOrEmpty(devicesJson))
+                var lines = File.ReadAllLines(deviceIdFilePath);
+                if (lines.Length >= 2)
                 {
-                    try
-                    {
-                        devices = JsonConvert.DeserializeObject<List<PairedDevice>>(devicesJson) ?? new List<PairedDevice>();
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error deserializing paired devices: {ex.Message}");
-                    }
+                    LocalDeviceId = lines[0];
+                    LocalDeviceName = lines[1];
+                }
+                else
+                {
+                    LocalDeviceId = Guid.NewGuid().ToString();
+                    LocalDeviceName = Environment.MachineName;
+                    File.WriteAllLines(deviceIdFilePath, new[] { LocalDeviceId, LocalDeviceName });
                 }
             }
+            else
+            {
+                LocalDeviceId = Guid.NewGuid().ToString();
+                LocalDeviceName = Environment.MachineName;
+                File.WriteAllLines(deviceIdFilePath, new[] { LocalDeviceId, LocalDeviceName });
+            }
 
-            return devices;
+            // Load paired devices
+            LoadPairedDevices();
         }
 
-        public PairedDevice? GetDeviceById(string deviceId)
+        /// <summary>
+        /// Load paired devices from storage
+        /// </summary>
+        private void LoadPairedDevices()
         {
-            return GetPairedDevices().Find(d => d.DeviceId == deviceId);
-        }
-
-        public PairedDevice? GetDeviceByIp(string ipAddress)
-        {
-            return GetPairedDevices().Find(d => d.IpAddress == ipAddress);
-        }
-
-        public bool IsPairedDevice(string deviceId)
-        {
-            return GetPairedDevices().Exists(d => d.DeviceId == deviceId);
-        }
-
-        public bool RemoveDevice(string deviceId)
-        {
-            int result = NativeMethods.openrelay_remove_device(deviceId);
-            return result == 0;
-        }
-
-        public async Task<bool> SendPairingRequestAsync(string ipAddress, int port = 9876)
-        {
-            return await Task.Run(() => {
-                try
-                {
-                    // Validate and normalize IP address
-                    if (string.IsNullOrEmpty(ipAddress))
-                    {
-                        System.Diagnostics.Debug.WriteLine("IP address is null or empty");
-                        return false;
-                    }
-
-                    // Check if this looks like an IPv4 address and normalize format if needed
-                    if (ipAddress.Contains(".") && !ipAddress.Contains(":"))
-                    {
-                        // Make sure it has all 4 parts
-                        var parts = ipAddress.Split('.');
-                        if (parts.Length == 4)
-                        {
-                            // This looks like a valid IPv4 address
-                            System.Diagnostics.Debug.WriteLine($"Using IPv4 address: {ipAddress}");
-                        }
-                        else if (parts.Length < 4)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"IP address appears incomplete: {ipAddress}");
-                            return false;
-                        }
-                    }
-
-                    System.Diagnostics.Debug.WriteLine($"Sending pairing request to {ipAddress}:{port}");
-                    int result = NativeMethods.openrelay_send_pairing_request(ipAddress, port);
-                    System.Diagnostics.Debug.WriteLine($"Pairing request result: {result}");
-                    return result > 0; // 1 = success, 0 = declined, negative = error
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Exception in SendPairingRequestAsync: {ex}");
-                    return false;
-                }
-            });
-        }
-
-        // Callback methods for Rust
-        // Keep static copies of strings to prevent them being garbage collected
-        private static string _lastDeviceId = "";
-        private static string _lastDeviceName = "";
-        private static string _lastIpAddress = "";
-        private static string _lastRequestId = "";
-        private static bool _dialogShown = false;
-        private static bool _dialogResult = false;
-
-        private int OnPairingRequest(IntPtr deviceIdPtr, IntPtr deviceNamePtr, IntPtr ipAddressPtr, int port, IntPtr requestIdPtr)
-        {
-            // ULTRA-DEFENSIVE: Only copy strings, don't try to process anything else in this callback
             try
             {
-                // MOST IMPORTANT: Copy all strings immediately to prevent use-after-free
-                if (deviceIdPtr != IntPtr.Zero)
+                if (File.Exists(_storageFilePath))
                 {
-                    try { _lastDeviceId = string.Copy(Marshal.PtrToStringAnsi(deviceIdPtr) ?? string.Empty); }
-                    catch { _lastDeviceId = "[Error]"; }
-                }
+                    var json = File.ReadAllText(_storageFilePath);
+                    var devices = JsonSerializer.Deserialize<List<PairedDevice>>(json);
 
-                if (deviceNamePtr != IntPtr.Zero)
-                {
-                    try { _lastDeviceName = string.Copy(Marshal.PtrToStringAnsi(deviceNamePtr) ?? string.Empty); }
-                    catch { _lastDeviceName = "[Error]"; }
-                }
-
-                if (ipAddressPtr != IntPtr.Zero)
-                {
-                    try { _lastIpAddress = string.Copy(Marshal.PtrToStringAnsi(ipAddressPtr) ?? string.Empty); }
-                    catch { _lastIpAddress = "[Error]"; }
-                }
-
-                if (requestIdPtr != IntPtr.Zero)
-                {
-                    try { _lastRequestId = string.Copy(Marshal.PtrToStringAnsi(requestIdPtr) ?? string.Empty); }
-                    catch { _lastRequestId = "[Error]"; }
-                }
-
-                // Reset dialog state
-                _dialogShown = false;
-                _dialogResult = false;
-
-                // Don't do any processing here - return hard-coded success to avoid issues
-                // We'll handle the real pairing logic in a separate thread
-                System.Diagnostics.Debug.WriteLine($"Captured pairing request from {_lastDeviceName}");
-
-                // Immediately trigger a UI update on a new thread
-                Task.Run(() => {
-                    try
+                    if (devices != null)
                     {
-                        if (PairingRequestReceived != null)
-                        {
-                            var args = new PairingRequestEventArgs(
-                                _lastDeviceId,
-                                _lastDeviceName,
-                                _lastIpAddress,
-                                port,
-                                _lastRequestId);
-
-                            PairingRequestReceived(this, args);
-                        }
+                        _pairedDevices.Clear();
+                        _pairedDevices.AddRange(devices);
                     }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Error in pairing task: {ex}");
-                    }
-                });
-
-                // For testing: Just auto-accept all pairing requests
-                return 1; // Accept all pairing requests for now
+                }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Critical error in OnPairingRequest: {ex}");
-                return 0; // Decline on error
+                System.Diagnostics.Debug.WriteLine($"Error loading paired devices: {ex.Message}");
             }
         }
 
-        private void OnDeviceAdded(IntPtr deviceIdPtr, IntPtr deviceNamePtr, IntPtr ipAddressPtr, int port)
+        /// <summary>
+        /// Save paired devices to storage
+        /// </summary>
+        private void SavePairedDevices()
         {
-            string deviceId = Marshal.PtrToStringAnsi(deviceIdPtr) ?? string.Empty;
-            string deviceName = Marshal.PtrToStringAnsi(deviceNamePtr) ?? string.Empty;
-            string ipAddress = Marshal.PtrToStringAnsi(ipAddressPtr) ?? string.Empty;
-
-            var device = new PairedDevice
+            try
             {
-                DeviceId = deviceId,
-                DeviceName = deviceName,
-                IpAddress = ipAddress,
-                Port = port,
-                LastSeen = DateTime.Now
-            };
+                var options = new JsonSerializerOptions
+                {
+                    WriteIndented = true
+                };
 
-            DeviceAdded?.Invoke(this, new DeviceEventArgs(device));
+                var json = JsonSerializer.Serialize(_pairedDevices, options);
+                File.WriteAllText(_storageFilePath, json);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error saving paired devices: {ex.Message}");
+            }
         }
 
-        private void OnDeviceRemoved(IntPtr deviceIdPtr)
+        /// <summary>
+        /// Get all paired devices
+        /// </summary>
+        public IReadOnlyList<PairedDevice> GetPairedDevices()
         {
-            string deviceId = Marshal.PtrToStringAnsi(deviceIdPtr) ?? string.Empty;
-
-            DeviceRemoved?.Invoke(this, new DeviceRemovedEventArgs(deviceId));
+            return _pairedDevices.AsReadOnly();
         }
 
+        /// <summary>
+        /// Get a device by ID
+        /// </summary>
+        public PairedDevice? GetDeviceById(string deviceId)
+        {
+            return _pairedDevices.FirstOrDefault(d => d.DeviceId == deviceId);
+        }
+
+        /// <summary>
+        /// Get a device by IP address
+        /// </summary>
+        public PairedDevice? GetDeviceByIp(string ipAddress)
+        {
+            return _pairedDevices.FirstOrDefault(d => d.IpAddress == ipAddress);
+        }
+
+        /// <summary>
+        /// Check if a device is paired
+        /// </summary>
+        public bool IsPairedDevice(string deviceId)
+        {
+            return _pairedDevices.Any(d => d.DeviceId == deviceId);
+        }
+
+        /// <summary>
+        /// Add or update a device
+        /// </summary>
+        public void AddOrUpdateDevice(PairedDevice device)
+        {
+            var existingDevice = _pairedDevices.FirstOrDefault(d => d.DeviceId == device.DeviceId);
+
+            if (existingDevice != null)
+            {
+                // Update existing device
+                existingDevice.DeviceName = device.DeviceName;
+                existingDevice.IpAddress = device.IpAddress;
+                existingDevice.Port = device.Port;
+                existingDevice.Platform = device.Platform;
+                existingDevice.SharedKey = device.SharedKey;
+                existingDevice.LastSeen = DateTime.Now;
+
+                // Notify listeners
+                DeviceUpdated?.Invoke(this, new DeviceEventArgs(existingDevice));
+            }
+            else
+            {
+                // Add new device
+                device.LastSeen = DateTime.Now;
+                _pairedDevices.Add(device);
+
+                // Notify listeners
+                DeviceAdded?.Invoke(this, new DeviceEventArgs(device));
+            }
+
+            // Save changes
+            SavePairedDevices();
+        }
+
+        /// <summary>
+        /// Remove a device
+        /// </summary>
+        public void RemoveDevice(string deviceId)
+        {
+            var device = _pairedDevices.FirstOrDefault(d => d.DeviceId == deviceId);
+            if (device != null)
+            {
+                _pairedDevices.Remove(device);
+
+                // Notify listeners
+                DeviceRemoved?.Invoke(this, deviceId);
+
+                // Save changes
+                SavePairedDevices();
+            }
+        }
+
+        /// <summary>
+        /// Update a device's last seen time
+        /// </summary>
+        public void UpdateDeviceLastSeen(string deviceId)
+        {
+            var device = _pairedDevices.FirstOrDefault(d => d.DeviceId == deviceId);
+            if (device != null)
+            {
+                device.LastSeen = DateTime.Now;
+                SavePairedDevices();
+            }
+        }
+
+        /// <summary>
+        /// Handle a pairing request
+        /// </summary>
+        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port)
+        {
+            // Check if already paired
+            if (IsPairedDevice(deviceId))
+            {
+                UpdateDeviceLastSeen(deviceId);
+                return true; // Already paired, accept automatically
+            }
+
+            // Create event args
+            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port);
+
+            // Notify listeners
+            PairingRequestReceived?.Invoke(this, args);
+
+            // If accepted, generate a key and add the device
+            if (args.Accepted)
+            {
+                var device = new PairedDevice
+                {
+                    DeviceId = deviceId,
+                    DeviceName = deviceName,
+                    IpAddress = ipAddress,
+                    Port = port,
+                    Platform = "Unknown", // Could be determined later
+                    SharedKey = _encryptionService.GenerateKey(),
+                    LastSeen = DateTime.Now
+                };
+
+                AddOrUpdateDevice(device);
+            }
+
+            return args.Accepted;
+        }
+
+        /// <summary>
+        /// Dispose the device manager
+        /// </summary>
         public void Dispose()
         {
-            // Nothing to dispose, but implementing IDisposable for consistency
+            // No special cleanup needed
         }
     }
 }

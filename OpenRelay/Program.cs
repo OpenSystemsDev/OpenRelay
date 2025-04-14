@@ -24,58 +24,39 @@ namespace OpenRelay
 
             try
             {
-                // Check if the DLL is properly loaded - this will throw if not
-                System.Diagnostics.Debug.WriteLine("Checking if DLL is loaded...");
-                IntPtr moduleHandle = LoadLibrary("openrelay_core.dll");
-                if (moduleHandle == IntPtr.Zero)
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    MessageBox.Show($"Failed to load openrelay_core.dll. Error code: {error}", "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
-                System.Diagnostics.Debug.WriteLine("DLL loaded successfully");
+                // Load the openrelay_encryption library
+                string dllPath = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "openrelay_core.dll");
 
-                // Initialize the Rust library
-                System.Diagnostics.Debug.WriteLine("Initializing Rust library...");
-                int result = NativeMethods.openrelay_init();
-                if (result != 0)
+                if (!System.IO.File.Exists(dllPath))
                 {
-                    MessageBox.Show($"Failed to initialize OpenRelay core library. Error code: {result}", "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(
+                        $"The core DLL was not found at: {dllPath}\n" +
+                        "Please make sure to copy the DLL to the application directory.",
+                        "DLL Not Found",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
                     return;
                 }
-                System.Diagnostics.Debug.WriteLine("Rust library initialized successfully");
 
-                // Start the OpenRelay services
-                System.Diagnostics.Debug.WriteLine("Starting OpenRelay services...");
-                result = NativeMethods.openrelay_start();
-                if (result != 0)
-                {
-                    MessageBox.Show($"Failed to start OpenRelay services. Error code: {result}", "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
-                System.Diagnostics.Debug.WriteLine("OpenRelay services started successfully");
+                // Start the application with our main form
+                Application.Run(new Form1());
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error initializing OpenRelay: {ex.Message}\n\nStack trace: {ex.StackTrace}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                MessageBox.Show(
+                    $"Error starting OpenRelay: {ex.Message}\n\n" +
+                    $"Stack trace: {ex.StackTrace}",
+                    "Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
             }
-
-            // Start the application with our main form
-            Application.Run(new Form1());
-
-            // Cleanup on exit
-            NativeMethods.openrelay_cleanup();
         }
 
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
-
-        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-        private static extern IntPtr LoadLibrary(string libname);
     }
 }

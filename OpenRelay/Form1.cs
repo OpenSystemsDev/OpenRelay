@@ -14,8 +14,13 @@ namespace OpenRelay
         private ToolStripMenuItem statusItem;
 
         // Services
-        private readonly DeviceManagerService deviceManager;
-        private readonly ClipboardService clipboardService;
+        private readonly EncryptionService _encryptionService;
+        private readonly DeviceManager _deviceManager;
+        private readonly ClipboardService _clipboardService;
+        private readonly NetworkService _networkService;
+
+        // Cancellation token source for network operations
+        private System.Threading.CancellationTokenSource? _cts;
 
         public Form1()
         {
@@ -33,50 +38,35 @@ namespace OpenRelay
             this.FormBorderStyle = FormBorderStyle.FixedToolWindow;
             this.Hide();
 
-            // Test P/Invoke functionality
-            TestDll.TestPInvoke();
-
             // Initialize services
             try
             {
-                System.Diagnostics.Debug.WriteLine("Initializing services in Form1...");
+                _encryptionService = new EncryptionService();
+                _deviceManager = new DeviceManager(_encryptionService);
+                _clipboardService = new ClipboardService();
+                _networkService = new NetworkService(_deviceManager, _encryptionService);
 
-                // Check if the DLL exists in the output directory
-                string dllPath = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "openrelay_core.dll");
+                // Set up event handlers
+                _deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
+                _deviceManager.DeviceAdded += DeviceManager_DeviceAdded;
+                _deviceManager.DeviceRemoved += DeviceManager_DeviceRemoved;
 
-                if (!System.IO.File.Exists(dllPath))
-                {
-                    string message = $"The Rust DLL was not found at: {dllPath}\n" +
-                                     "Please make sure to copy the DLL to the application directory.";
-                    System.Diagnostics.Debug.WriteLine(message);
-                    MessageBox.Show(message, "DLL Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    UpdateStatus("DLL Missing");
-                    return;
-                }
+                _clipboardService.ClipboardChanged += ClipboardService_ClipboardChanged;
 
-                // Initialize device manager first
-                deviceManager = new DeviceManagerService();
-                deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
-                deviceManager.DeviceAdded += DeviceManager_DeviceAdded;
-                deviceManager.DeviceRemoved += DeviceManager_DeviceRemoved;
+                _networkService.ClipboardDataReceived += NetworkService_ClipboardDataReceived;
 
-                System.Diagnostics.Debug.WriteLine("Device manager initialized");
+                // Start services
+                _clipboardService.Start();
 
-                // Initialize clipboard service
-                clipboardService = new ClipboardService();
-                clipboardService.ClipboardDataReceived += ClipboardService_ClipboardDataReceived;
-
-                System.Diagnostics.Debug.WriteLine("Clipboard service initialized");
+                _cts = new System.Threading.CancellationTokenSource();
+                Task.Run(async () => await StartNetworkServiceAsync(), _cts.Token);
 
                 // Update status
                 UpdateStatus("Connected");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in Form1 constructor: {ex}");
-                MessageBox.Show($"Error initializing services: {ex.Message}\n\nStack trace: {ex.StackTrace}", "Error",
+                MessageBox.Show($"Error initializing services: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 UpdateStatus("Error");
             }
@@ -103,56 +93,39 @@ namespace OpenRelay
             trayIcon.DoubleClick += TrayIcon_DoubleClick;
         }
 
-        private void DeviceManager_PairingRequestReceived(object sender, PairingRequestEventArgs e)
+        private async Task StartNetworkServiceAsync()
         {
             try
             {
-                // Need to show UI on the UI thread
-                if (InvokeRequired)
-                {
-                    Invoke(new Action<object, PairingRequestEventArgs>(DeviceManager_PairingRequestReceived), sender, e);
-                    return;
-                }
-
-                System.Diagnostics.Debug.WriteLine($"Handling pairing request for {e.DeviceName} on UI thread");
-
-                // For testing, let's just accept all pairing requests automatically
-                // This bypasses the UI dialog that might be causing problems
-                e.Accepted = true;
-                System.Diagnostics.Debug.WriteLine($"Auto-accepting pairing request");
-
-                trayIcon.ShowBalloonTip(
-                    3000,
-                    "Pairing Request",
-                    $"Paired with {e.DeviceName} ({e.IpAddress})",
-                    ToolTipIcon.Info
-                );
-
-                /*
-                // This part is commented out for testing - we'll bypass the dialog
-                try
-                {
-                    using (var dialog = new PairingRequestDialog(e.DeviceName, e.DeviceId, e.IpAddress))
-                    {
-                        dialog.ShowDialog();
-                        
-                        // Set the result
-                        e.Accepted = dialog.Accepted;
-                        System.Diagnostics.Debug.WriteLine($"Pairing request {(e.Accepted ? "accepted" : "declined")}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Error showing pairing dialog: {ex}");
-                    e.Accepted = false; // Decline on error
-                }
-                */
+                await _networkService.StartAsync();
+                UpdateStatus("Connected");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in PairingRequestReceived: {ex}");
-                // Make sure to set Accepted to some value even on error
-                e.Accepted = true; // For testing, accept even on error
+                System.Diagnostics.Debug.WriteLine($"Error starting network service: {ex.Message}");
+                UpdateStatus("Offline");
+            }
+        }
+
+        private void DeviceManager_PairingRequestReceived(object sender, PairingRequestEventArgs e)
+        {
+            // Need to show UI on the UI thread
+            if (InvokeRequired)
+            {
+                Invoke(new Action<object, PairingRequestEventArgs>(DeviceManager_PairingRequestReceived), sender, e);
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"Showing pairing dialog for device {e.DeviceName}");
+
+            // Show pairing request dialog
+            using (var dialog = new PairingRequestDialog(e.DeviceName, e.DeviceId, e.IpAddress))
+            {
+                dialog.ShowDialog();
+
+                // Set the result
+                e.Accepted = dialog.Accepted;
+                System.Diagnostics.Debug.WriteLine($"Pairing request {(e.Accepted ? "accepted" : "declined")}");
             }
         }
 
@@ -172,16 +145,16 @@ namespace OpenRelay
             );
         }
 
-        private void DeviceManager_DeviceRemoved(object sender, DeviceRemovedEventArgs e)
+        private void DeviceManager_DeviceRemoved(object sender, string deviceId)
         {
             if (InvokeRequired)
             {
-                Invoke(new Action<object, DeviceRemovedEventArgs>(DeviceManager_DeviceRemoved), sender, e);
+                Invoke(new Action<object, string>(DeviceManager_DeviceRemoved), sender, deviceId);
                 return;
             }
 
-            var device = deviceManager.GetDeviceById(e.DeviceId);
-            string deviceName = device?.DeviceName ?? e.DeviceId;
+            var device = _deviceManager.GetDeviceById(deviceId);
+            string deviceName = device?.DeviceName ?? deviceId;
 
             trayIcon.ShowBalloonTip(
                 2000,
@@ -191,18 +164,38 @@ namespace OpenRelay
             );
         }
 
-        private void ClipboardService_ClipboardDataReceived(object sender, ClipboardEventArgs e)
+        private void ClipboardService_ClipboardChanged(object sender, ClipboardChangedEventArgs e)
+        {
+            // Skip if we're updating the clipboard ourselves
+            if (e.Data == null)
+                return;
+
+            System.Diagnostics.Debug.WriteLine($"Clipboard changed: {e.Data.Format}");
+
+            // Send clipboard data to paired devices
+            if (_cts != null && !_cts.IsCancellationRequested)
+            {
+                Task.Run(async () => await _networkService.SendClipboardDataAsync(e.Data, _cts.Token));
+            }
+        }
+
+        private void NetworkService_ClipboardDataReceived(object sender, ClipboardDataReceivedEventArgs e)
         {
             if (InvokeRequired)
             {
-                Invoke(new Action<object, ClipboardEventArgs>(ClipboardService_ClipboardDataReceived), sender, e);
+                Invoke(new Action<object, ClipboardDataReceivedEventArgs>(NetworkService_ClipboardDataReceived), sender, e);
                 return;
             }
+
+            System.Diagnostics.Debug.WriteLine($"Clipboard data received from {e.Device.DeviceName}");
+
+            // Update local clipboard
+            _clipboardService.UpdateClipboard(e.Data);
 
             trayIcon.ShowBalloonTip(
                 2000,
                 "Clipboard Received",
-                $"Format: {e.Data.Format}",
+                $"Clipboard data received from {e.Device.DeviceName}",
                 ToolTipIcon.Info
             );
         }
@@ -241,7 +234,7 @@ namespace OpenRelay
                     // Send pairing request
                     Task.Run(async () =>
                     {
-                        bool success = await deviceManager.SendPairingRequestAsync(ipAddress);
+                        bool success = await _networkService.SendPairingRequestAsync(ipAddress);
 
                         if (InvokeRequired)
                         {
@@ -278,8 +271,8 @@ namespace OpenRelay
 
         private void DebugItem_Click(object? sender, EventArgs e)
         {
-            // Show simplified debug info
-            var devices = deviceManager.GetPairedDevices();
+            // Show debug info
+            var devices = _deviceManager.GetPairedDevices();
             if (devices.Count == 0)
             {
                 MessageBox.Show("No paired devices found. Add a device to get started.", "Devices",
@@ -301,7 +294,7 @@ namespace OpenRelay
         private void ShowDevices()
         {
             // Show paired devices
-            var devices = deviceManager.GetPairedDevices();
+            var devices = _deviceManager.GetPairedDevices();
             if (devices.Count == 0)
             {
                 MessageBox.Show("No paired devices found. Add a device to get started.", "Devices",
@@ -327,9 +320,13 @@ namespace OpenRelay
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Cancel network operations
+            _cts?.Cancel();
+
             // Clean up services
-            clipboardService?.Dispose();
-            deviceManager?.Dispose();
+            _networkService?.Dispose();
+            _clipboardService?.Dispose();
+            _encryptionService?.Dispose();
 
             // Clean up tray icon
             trayIcon.Visible = false;
