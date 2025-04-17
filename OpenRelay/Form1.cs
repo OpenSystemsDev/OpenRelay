@@ -46,12 +46,6 @@ namespace OpenRelay
                 _clipboardService = new ClipboardService();
                 _networkService = new NetworkService(_deviceManager, _encryptionService);
 
-                // Register services in the ServiceLocator
-                ServiceLocator.RegisterService(_clipboardService);
-                ServiceLocator.RegisterService(_networkService);
-                ServiceLocator.RegisterService(_deviceManager);
-                ServiceLocator.RegisterService(_encryptionService);
-
                 // Set up event handlers
                 _deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
                 _deviceManager.DeviceAdded += DeviceManager_DeviceAdded;
@@ -172,39 +166,7 @@ namespace OpenRelay
 
         private void ClipboardService_ClipboardChanged(object sender, ClipboardChangedEventArgs e)
         {
-            // Handle clipboard clear
-            if (e.IsCleared)
-            {
-                System.Diagnostics.Debug.WriteLine("[SYNC] Clipboard cleared locally, sending clear to paired devices");
-
-                // Send clipboard clear to paired devices
-                if (_cts != null && !_cts.IsCancellationRequested)
-                {
-                    // Get number of paired devices
-                    var devices = _deviceManager.GetPairedDevices();
-                    if (devices.Count == 0)
-                    {
-                        System.Diagnostics.Debug.WriteLine("[SYNC] No paired devices to send clear to");
-                        return;
-                    }
-
-                    Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await _networkService.SendClipboardClearAsync(_cts.Token);
-                        }
-                        catch (Exception ex)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[SYNC] Error sending clipboard clear: {ex}");
-                        }
-                    });
-                }
-
-                return;
-            }
-
-            // Skip if we're updating the clipboard ourselves or no data
+            // Skip if we're updating the clipboard ourselves
             if (e.Data == null)
                 return;
 
@@ -242,22 +204,6 @@ namespace OpenRelay
             if (InvokeRequired)
             {
                 Invoke(new Action<object, ClipboardDataReceivedEventArgs>(NetworkService_ClipboardDataReceived), sender, e);
-                return;
-            }
-
-            if (e.Data == null)
-            {
-                System.Diagnostics.Debug.WriteLine($"Clipboard clear received from {e.Device.DeviceName}");
-
-                // Clear local clipboard
-                _clipboardService.ClearClipboard();
-
-                trayIcon.ShowBalloonTip(
-                    2000,
-                    "Clipboard Cleared",
-                    $"Clipboard cleared by {e.Device.DeviceName}",
-                    ToolTipIcon.Info
-                );
                 return;
             }
 
