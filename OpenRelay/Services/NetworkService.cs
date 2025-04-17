@@ -306,11 +306,6 @@ namespace OpenRelay.Services
                                                 if (!string.IsNullOrEmpty(deviceId))
                                                 {
                                                     device = _deviceManager.GetDeviceById(deviceId);
-                                                    if (device != null)
-                                                    {
-                                                        // Add to connected clients
-                                                        _connectedClients[deviceId] = webSocket;
-                                                    }
                                                 }
                                                 break;
 
@@ -319,6 +314,14 @@ namespace OpenRelay.Services
                                                 if (device != null)
                                                 {
                                                     await HandleClipboardUpdateAsync(root, device, cancellationToken);
+                                                }
+                                                break;
+
+                                            case MessageType.ClipboardClear:
+                                                // Only process clipboard clear from authenticated devices
+                                                if (device != null)
+                                                {
+                                                    await HandleClipboardClearAsync(device, cancellationToken);
                                                 }
                                                 break;
 
@@ -486,6 +489,21 @@ namespace OpenRelay.Services
 
                 await SendMessageAsync(webSocket, response, cancellationToken);
 
+                // Add to connected clients (must happen before sending clipboard)
+                _connectedClients[deviceId] = webSocket;
+
+                // Get the ClipboardService to sync current clipboard (if any)
+                var clipboardService = ServiceLocator.GetService<ClipboardService>();
+                if (clipboardService != null)
+                {
+                    var currentClipboard = clipboardService.CurrentClipboardData;
+                    if (currentClipboard != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Syncing current clipboard to newly connected device {deviceName}");
+                        await SendClipboardDataToDeviceAsync(currentClipboard, device, cancellationToken);
+                    }
+                }
+
                 return deviceId;
             }
             else
@@ -503,6 +521,7 @@ namespace OpenRelay.Services
                 return null;
             }
         }
+
 
         /// <summary>
         /// Handle a clipboard update
@@ -629,6 +648,22 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error connecting to {device.DeviceName}: {ex.Message}");
             }
         }
+
+        // <summary>
+        // / Handle clipboard clear request
+        // / </summary>
+        private async Task HandleClipboardClearAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received clipboard clear from {device.DeviceName}");
+
+            // Get the ClipboardService to clear the clipboard
+            var clipboardService = ServiceLocator.GetService<ClipboardService>();
+            if (clipboardService != null)
+            {
+                clipboardService.ClearClipboard();
+            }
+        }
+
 
         /// <summary>
         /// Process messages from a WebSocket connection
@@ -1006,6 +1041,120 @@ namespace OpenRelay.Services
                 return false;
             }
         }
+
+        /// <summary>
+        /// Send clipboard clear command to all devices
+        /// </summary>
+        public async Task SendClipboardClearAsync(CancellationToken cancellationToken = default)
+        {
+            System.Diagnostics.Debug.WriteLine("[NETWORK] Sending clipboard clear to all devices");
+
+            // Get all paired devices
+            var devices = _deviceManager.GetPairedDevices();
+
+            foreach (var device in devices)
+            {
+                try
+                {
+                    // Check if device is connected or connect to it
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        await ConnectToDeviceAsync(device, cancellationToken);
+
+                        if (!_connectedClients.TryGetValue(device.DeviceId, out webSocket) || webSocket.State != WebSocketState.Open)
+                        {
+                            continue; // Skip if not connected
+                        }
+                    }
+
+                    // Create clear message
+                    var message = new ClipboardClearMessage
+                    {
+                        DeviceId = _deviceManager.LocalDeviceId,
+                        DeviceName = _deviceManager.LocalDeviceName
+                    };
+
+                    // Send message
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard clear to {device.DeviceName}: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Send clipboard data to a specific device
+        /// </summary>
+        public async Task SendClipboardDataToDeviceAsync(ClipboardData data, PairedDevice device, CancellationToken cancellationToken = default)
+        {
+            if (data == null)
+                return;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending clipboard data to {device.DeviceName}");
+
+                // Check if device is connected or connect to it
+                if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                {
+                    await ConnectToDeviceAsync(device, cancellationToken);
+
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}");
+                        return;
+                    }
+                }
+
+                // Check if we have a shared key
+                if (string.IsNullOrEmpty(device.SharedKey))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}");
+                    return;
+                }
+
+                // Encrypt the data
+                string encryptedData;
+                bool isBinary = false;
+
+                if (data.Format == "text/plain" && data.TextData != null)
+                {
+                    encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
+                }
+                else if (data.Format == "image/png" && data.BinaryData != null)
+                {
+                    var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
+                    encryptedData = Convert.ToBase64String(encryptedBytes);
+                    isBinary = true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format: {data.Format}");
+                    return;
+                }
+
+                // Create message
+                var message = new ClipboardUpdateMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    Format = data.Format,
+                    Data = encryptedData,
+                    IsBinary = isBinary,
+                    Timestamp = data.Timestamp
+                };
+
+                // Send message
+                await SendMessageAsync(webSocket, message, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data to {device.DeviceName}: {ex.Message}");
+            }
+        }
+
 
         /// <summary>
         /// Dispose of the network service

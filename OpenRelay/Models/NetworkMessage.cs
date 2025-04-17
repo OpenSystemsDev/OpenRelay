@@ -14,6 +14,7 @@ namespace OpenRelay.Models
         AuthSuccess,
         AuthFailed,
         ClipboardUpdate,
+        ClipboardClear,  // New message type for clipboard clear
         Error
     }
 
@@ -177,6 +178,20 @@ namespace OpenRelay.Models
         /// </summary>
         [JsonPropertyName("is_binary")]
         public bool IsBinary { get; set; }
+    }
+
+    /// <summary>
+    /// Message for clipboard clear operations
+    /// </summary>
+    public class ClipboardClearMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new clipboard clear message
+        /// </summary>
+        public ClipboardClearMessage()
+        {
+            Type = MessageType.ClipboardClear.ToString();
+        }
     }
 
     /// <summary>

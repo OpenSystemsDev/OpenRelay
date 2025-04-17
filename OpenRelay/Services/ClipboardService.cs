@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Security.Cryptography;
 using OpenRelay.Models;
 
 namespace OpenRelay.Services
@@ -10,10 +11,12 @@ namespace OpenRelay.Services
     public class ClipboardChangedEventArgs : EventArgs
     {
         public ClipboardData Data { get; }
+        public bool IsCleared { get; }
 
-        public ClipboardChangedEventArgs(ClipboardData data)
+        public ClipboardChangedEventArgs(ClipboardData data, bool isCleared = false)
         {
             Data = data;
+            IsCleared = isCleared;
         }
     }
 
@@ -39,8 +42,18 @@ namespace OpenRelay.Services
         // Flag to prevent clipboard loops
         private bool _isUpdatingClipboard = false;
 
+        // Store last clipboard data and hash for deduplication
+        private ClipboardData? _lastClipboardData = null;
+        private string? _lastContentHash = null;
+        private bool _clipboardWasCleared = false;
+
         // Form for clipboard monitoring
         private ClipboardMonitorForm? _monitorForm;
+
+        /// <summary>
+        /// Gets the current clipboard data
+        /// </summary>
+        public ClipboardData? CurrentClipboardData => _lastClipboardData;
 
         /// <summary>
         /// Start monitoring clipboard changes
@@ -54,6 +67,21 @@ namespace OpenRelay.Services
             _monitorForm.ClipboardUpdate += (s, e) => OnClipboardChanged();
             _monitorForm.Show();
             _monitorForm.Hide(); // Keep the form hidden but running
+
+            // Check initial clipboard content
+            try
+            {
+                _lastClipboardData = GetClipboardContent();
+                if (_lastClipboardData != null)
+                {
+                    // Calculate initial hash
+                    _lastContentHash = CalculateContentHash(_lastClipboardData);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error getting initial clipboard content: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -84,6 +112,9 @@ namespace OpenRelay.Services
                 if (data.Format == "text/plain" && data.TextData != null)
                 {
                     Clipboard.SetText(data.TextData);
+                    _lastClipboardData = data;
+                    _lastContentHash = CalculateContentHash(data);
+                    _clipboardWasCleared = false;
                 }
                 else if (data.Format == "image/png" && data.BinaryData != null)
                 {
@@ -91,6 +122,9 @@ namespace OpenRelay.Services
                     {
                         var image = System.Drawing.Image.FromStream(ms);
                         Clipboard.SetImage(image);
+                        _lastClipboardData = data;
+                        _lastContentHash = CalculateContentHash(data);
+                        _clipboardWasCleared = false;
                     }
                 }
             }
@@ -105,6 +139,30 @@ namespace OpenRelay.Services
             }
         }
 
+        /// <summary>
+        /// Clear the clipboard on this device
+        /// </summary>
+        public void ClearClipboard()
+        {
+            try
+            {
+                _isUpdatingClipboard = true;
+                Clipboard.Clear();
+                _lastClipboardData = null;
+                _lastContentHash = null;
+                _clipboardWasCleared = true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error clearing clipboard: {ex.Message}");
+            }
+            finally
+            {
+                // Reset flag after a short delay
+                Task.Delay(100).ContinueWith(_ => _isUpdatingClipboard = false);
+            }
+        }
+
         private void OnClipboardChanged()
         {
             if (_isUpdatingClipboard)
@@ -115,9 +173,44 @@ namespace OpenRelay.Services
 
             try
             {
+                // Check if clipboard is empty/cleared
+                bool isClipboardEmpty = !Clipboard.ContainsText() && !Clipboard.ContainsImage() && !Clipboard.ContainsFileDropList();
+
+                if (isClipboardEmpty && !_clipboardWasCleared)
+                {
+                    System.Diagnostics.Debug.WriteLine("[CLIPBOARD] Detected clipboard clear");
+                    _clipboardWasCleared = true;
+                    _lastClipboardData = null;
+                    _lastContentHash = null;
+
+                    // Notify about clipboard clear
+                    ClipboardChanged?.Invoke(this, new ClipboardChangedEventArgs(null, true));
+                    return;
+                }
+                else if (isClipboardEmpty)
+                {
+                    // Clipboard was already cleared, nothing to do
+                    return;
+                }
+
+                // Reset cleared flag if we have content
+                _clipboardWasCleared = false;
+
                 var data = GetClipboardContent();
                 if (data != null)
                 {
+                    // Check for duplicates using hash
+                    string newHash = CalculateContentHash(data);
+                    if (newHash == _lastContentHash)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[CLIPBOARD] Skipping duplicate clipboard content");
+                        return;
+                    }
+
+                    // Update stored data and hash
+                    _lastClipboardData = data;
+                    _lastContentHash = newHash;
+
                     System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected change: Format={data.Format}, Size={data.TextData?.Length ?? data.BinaryData?.Length ?? 0}");
                     ClipboardChanged?.Invoke(this, new ClipboardChangedEventArgs(data));
                 }
@@ -171,6 +264,40 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"Error getting clipboard content: {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Calculate a hash for clipboard content to detect duplicates
+        /// </summary>
+        private string CalculateContentHash(ClipboardData data)
+        {
+            try
+            {
+                byte[] hashInput;
+
+                if (data.Format == "text/plain" && data.TextData != null)
+                {
+                    hashInput = System.Text.Encoding.UTF8.GetBytes(data.TextData);
+                }
+                else if (data.Format == "image/png" && data.BinaryData != null)
+                {
+                    hashInput = data.BinaryData;
+                }
+                else
+                {
+                    return Guid.NewGuid().ToString(); // Fallback unique string
+                }
+
+                using (var md5 = MD5.Create())
+                {
+                    byte[] hashBytes = md5.ComputeHash(hashInput);
+                    return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                }
+            }
+            catch
+            {
+                return Guid.NewGuid().ToString(); // Fallback unique string
             }
         }
 
