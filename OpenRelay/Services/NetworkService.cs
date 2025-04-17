@@ -238,6 +238,9 @@ namespace OpenRelay.Services
             string? deviceId = null;
             PairedDevice? device = null;
 
+            // Message reassembly state
+            StringBuilder messageBuilder = new StringBuilder();
+
             try
             {
                 while (webSocket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
@@ -255,78 +258,96 @@ namespace OpenRelay.Services
                     // Process the message
                     if (receiveResult.MessageType == WebSocketMessageType.Text)
                     {
-                        var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
+                        // Append this frame to the message builder
+                        var frameText = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
+                        messageBuilder.Append(frameText);
 
-                        try
+                        // If this is the final frame of the message, process the complete message
+                        if (receiveResult.EndOfMessage)
                         {
-                            // Parse the message as JSON
-                            var jsonDoc = JsonDocument.Parse(message);
-                            var root = jsonDoc.RootElement;
+                            var message = messageBuilder.ToString();
+                            messageBuilder.Clear(); // Reset for next message
 
-                            // Check message type
-                            if (root.TryGetProperty("type", out var typeProperty))
+                            // Log a snippet of the message (avoid logging huge messages)
+                            int logLength = Math.Min(100, message.Length);
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received complete message, length={message.Length}, starts with: {message.Substring(0, logLength)}...");
+
+                            try
                             {
-                                var type = typeProperty.GetString() ?? string.Empty;
+                                // Parse the message as JSON
+                                var jsonDoc = JsonDocument.Parse(message);
+                                var root = jsonDoc.RootElement;
 
-                                if (Enum.TryParse<MessageType>(type, true, out var messageType))
+                                // Check message type
+                                if (root.TryGetProperty("type", out var typeProperty))
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message of type {messageType}");
+                                    var type = typeProperty.GetString() ?? string.Empty;
 
-                                    // Handle different message types
-                                    switch (messageType)
+                                    if (Enum.TryParse<MessageType>(type, true, out var messageType))
                                     {
-                                        case MessageType.PairingRequest:
-                                            await HandlePairingRequestAsync(webSocket, root, ipAddress, cancellationToken);
-                                            break;
+                                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message of type {messageType}");
 
-                                        case MessageType.PairingResponse:
-                                            await HandlePairingResponseAsync(root, cancellationToken);
-                                            break;
+                                        // Handle different message types
+                                        switch (messageType)
+                                        {
+                                            case MessageType.PairingRequest:
+                                                await HandlePairingRequestAsync(webSocket, root, ipAddress, cancellationToken);
+                                                break;
 
-                                        case MessageType.Auth:
-                                            // Try to authenticate the device
-                                            deviceId = await HandleAuthAsync(webSocket, root, ipAddress, cancellationToken);
+                                            case MessageType.PairingResponse:
+                                                await HandlePairingResponseAsync(root, cancellationToken);
+                                                break;
 
-                                            // Get the device
-                                            if (!string.IsNullOrEmpty(deviceId))
-                                            {
-                                                device = _deviceManager.GetDeviceById(deviceId);
+                                            case MessageType.Auth:
+                                                // Try to authenticate the device
+                                                deviceId = await HandleAuthAsync(webSocket, root, ipAddress, cancellationToken);
+
+                                                // Get the device
+                                                if (!string.IsNullOrEmpty(deviceId))
+                                                {
+                                                    device = _deviceManager.GetDeviceById(deviceId);
+                                                    if (device != null)
+                                                    {
+                                                        // Add to connected clients
+                                                        _connectedClients[deviceId] = webSocket;
+                                                    }
+                                                }
+                                                break;
+
+                                            case MessageType.ClipboardUpdate:
+                                                // Only process clipboard updates from authenticated devices
                                                 if (device != null)
                                                 {
-                                                    // Add to connected clients
-                                                    _connectedClients[deviceId] = webSocket;
+                                                    await HandleClipboardUpdateAsync(root, device, cancellationToken);
                                                 }
-                                            }
-                                            break;
+                                                break;
 
-                                        case MessageType.ClipboardUpdate:
-                                            // Only process clipboard updates from authenticated devices
-                                            if (device != null)
-                                            {
-                                                await HandleClipboardUpdateAsync(root, device, cancellationToken);
-                                            }
-                                            break;
-
-                                        default:
-                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
-                                            break;
+                                            default:
+                                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
+                                                break;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
-
-                            // Send error response
-                            var errorMessage = new ErrorMessage
+                            catch (Exception ex)
                             {
-                                DeviceId = _deviceManager.LocalDeviceId,
-                                DeviceName = _deviceManager.LocalDeviceName,
-                                Error = "Error processing message"
-                            };
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
 
-                            await SendMessageAsync(webSocket, errorMessage, cancellationToken);
+                                // Send error response
+                                var errorMessage = new ErrorMessage
+                                {
+                                    DeviceId = _deviceManager.LocalDeviceId,
+                                    DeviceName = _deviceManager.LocalDeviceName,
+                                    Error = "Error processing message"
+                                };
+
+                                await SendMessageAsync(webSocket, errorMessage, cancellationToken);
+                            }
+                        }
+                        else
+                        {
+                            // This is a continuation frame, just log that we're accumulating
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received partial message frame, size={receiveResult.Count}, accumulated={messageBuilder.Length}");
                         }
                     }
                 }
@@ -615,6 +636,7 @@ namespace OpenRelay.Services
         private async Task ProcessWebSocketMessagesAsync(WebSocket webSocket, PairedDevice device)
         {
             var buffer = new byte[16384]; // 16KB buffer
+            StringBuilder messageBuilder = new StringBuilder();
 
             try
             {
@@ -638,49 +660,65 @@ namespace OpenRelay.Services
                     // Handle text messages
                     if (receiveResult.MessageType == WebSocketMessageType.Text)
                     {
-                        var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message from {device.DeviceName}: {message.Substring(0, Math.Min(100, message.Length))}...");
+                        // Append this frame to the message builder
+                        var frameText = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
+                        messageBuilder.Append(frameText);
 
-                        // Parse and handle the message
-                        try
+                        // If this is the final frame of the message, process the complete message
+                        if (receiveResult.EndOfMessage)
                         {
-                            var jsonDoc = JsonDocument.Parse(message);
-                            var root = jsonDoc.RootElement;
+                            var message = messageBuilder.ToString();
+                            messageBuilder.Clear(); // Reset for next message
 
-                            if (root.TryGetProperty("type", out var typeProperty))
+                            int logLength = Math.Min(100, message.Length);
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received complete message from {device.DeviceName}, length={message.Length}, starts with: {message.Substring(0, logLength)}...");
+
+                            // Parse and handle the message
+                            try
                             {
-                                var typeStr = typeProperty.GetString() ?? string.Empty;
+                                var jsonDoc = JsonDocument.Parse(message);
+                                var root = jsonDoc.RootElement;
 
-                                if (Enum.TryParse<MessageType>(typeStr, true, out var messageType))
+                                if (root.TryGetProperty("type", out var typeProperty))
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Message type: {messageType}");
+                                    var typeStr = typeProperty.GetString() ?? string.Empty;
 
-                                    switch (messageType)
+                                    if (Enum.TryParse<MessageType>(typeStr, true, out var messageType))
                                     {
-                                        case MessageType.AuthSuccess:
-                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication successful with {device.DeviceName}");
-                                            break;
+                                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Message type: {messageType}");
 
-                                        case MessageType.AuthFailed:
-                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication failed with {device.DeviceName}");
-                                            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Authentication failed", CancellationToken.None);
-                                            _connectedClients.Remove(device.DeviceId);
-                                            break;
+                                        switch (messageType)
+                                        {
+                                            case MessageType.AuthSuccess:
+                                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication successful with {device.DeviceName}");
+                                                break;
 
-                                        case MessageType.ClipboardUpdate:
-                                            await HandleClipboardUpdateAsync(root, device, CancellationToken.None);
-                                            break;
+                                            case MessageType.AuthFailed:
+                                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication failed with {device.DeviceName}");
+                                                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Authentication failed", CancellationToken.None);
+                                                _connectedClients.Remove(device.DeviceId);
+                                                break;
 
-                                        default:
-                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
-                                            break;
+                                            case MessageType.ClipboardUpdate:
+                                                await HandleClipboardUpdateAsync(root, device, CancellationToken.None);
+                                                break;
+
+                                            default:
+                                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
+                                                break;
+                                        }
                                     }
                                 }
                             }
+                            catch (Exception ex)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
+                            }
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
+                            // This is a continuation frame, just log that we're accumulating
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received partial message frame from {device.DeviceName}, size={receiveResult.Count}, accumulated={messageBuilder.Length}");
                         }
                     }
                 }
@@ -716,8 +754,40 @@ namespace OpenRelay.Services
                 var json = JsonSerializer.Serialize(message);
                 var buffer = Encoding.UTF8.GetBytes(json);
 
-                // Send the message
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+                // Log message size
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message, size={buffer.Length} bytes");
+
+                // For large messages send in chunks
+                if (buffer.Length > 8192) // A 8KB chunk
+                {
+                    int totalSent = 0;
+                    while (totalSent < buffer.Length)
+                    {
+                        int chunkSize = Math.Min(8192, buffer.Length - totalSent);
+                        bool isLastChunk = (totalSent + chunkSize) >= buffer.Length;
+
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {totalSent}-{totalSent + chunkSize} of {buffer.Length}, isLastChunk={isLastChunk}");
+
+                        await webSocket.SendAsync(
+                            new ArraySegment<byte>(buffer, totalSent, chunkSize),
+                            WebSocketMessageType.Text,
+                            isLastChunk, // EndOfMessage flag
+                            cancellationToken);
+
+                        totalSent += chunkSize;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Completed sending large message in chunks");
+                }
+                else
+                {
+                    // For small messages, send all at once
+                    await webSocket.SendAsync(
+                        new ArraySegment<byte>(buffer),
+                        WebSocketMessageType.Text,
+                        true, // EndOfMessage
+                        cancellationToken);
+                }
             }
             catch (Exception ex)
             {
