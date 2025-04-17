@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Security.Cryptography;
 using OpenRelay.Models;
+using System.Collections.Concurrent;
 
 namespace OpenRelay.Services
 {
@@ -43,6 +44,13 @@ namespace OpenRelay.Services
         // Store last content hash for deduplication
         private string? _lastContentHash = null;
 
+        // Track recently seen content hashes to avoid ping-pong updates
+        private ConcurrentDictionary<string, DateTime> _recentlySeen = new ConcurrentDictionary<string, DateTime>();
+
+        // Manage "cool-down" period after a local change
+        private DateTime _lastLocalChangeTime = DateTime.MinValue;
+        private static readonly TimeSpan CooldownPeriod = TimeSpan.FromMilliseconds(150);
+
         // Form for clipboard monitoring
         private ClipboardMonitorForm? _monitorForm;
 
@@ -58,6 +66,15 @@ namespace OpenRelay.Services
             _monitorForm.ClipboardUpdate += (s, e) => OnClipboardChanged();
             _monitorForm.Show();
             _monitorForm.Hide(); // Keep the form hidden but running
+
+            // Start a periodic cleanup task for the recently seen dictionary
+            Task.Run(async () => {
+                while (true)
+                {
+                    CleanupRecentlySeen();
+                    await Task.Delay(TimeSpan.FromMinutes(1));
+                }
+            });
         }
 
         /// <summary>
@@ -74,7 +91,7 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Update the clipboard content
+        /// Update the clipboard content from a remote device
         /// </summary>
         public void UpdateClipboard(ClipboardData data)
         {
@@ -83,6 +100,49 @@ namespace OpenRelay.Services
 
             try
             {
+                string dataHash = CalculateContentHash(data);
+
+                // Check if this update was recently seen
+                if (_recentlySeen.TryGetValue(dataHash, out var lastSeen) &&
+                    (DateTime.Now - lastSeen) < TimeSpan.FromSeconds(3))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Ignoring recently seen remote update {dataHash.Substring(0, 8)}");
+                    return;
+                }
+
+                // Check if we're in cooldown period after a local change
+                var timeSinceLocalChange = DateTime.Now - _lastLocalChangeTime;
+                if (timeSinceLocalChange < CooldownPeriod)
+                {
+                    if (dataHash == _lastContentHash)
+                    {
+                        // This is an echo of our own change, just mark it as seen
+                        System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected echo of our own local change during cooldown, ignoring");
+                        _recentlySeen[dataHash] = DateTime.Now;
+                        return;
+                    }
+                    else
+                    {
+                        // This is a different update that arrived during our cooldown period
+                        // Let's delay it a bit to give priority to our local change
+                        System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Remote update during cooldown period, delaying");
+                        Task.Delay(CooldownPeriod - timeSinceLocalChange).ContinueWith(_ =>
+                            UpdateClipboard(data)
+                        );
+                        return;
+                    }
+                }
+
+                // Check against the last hash for duplication
+                if (dataHash == _lastContentHash)
+                {
+                    System.Diagnostics.Debug.WriteLine("[CLIPBOARD] Skipping duplicate clipboard content");
+                    return;
+                }
+
+                // Mark this hash as recently seen
+                _recentlySeen[dataHash] = DateTime.Now;
+
                 _isUpdatingClipboard = true;
 
                 if (data.Format == "text/plain" && data.TextData != null)
@@ -99,7 +159,8 @@ namespace OpenRelay.Services
                 }
 
                 // Update last content hash
-                _lastContentHash = CalculateContentHash(data);
+                _lastContentHash = dataHash;
+                System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Applied remote clipboard update {dataHash.Substring(0, 8)}");
             }
             catch (Exception ex)
             {
@@ -125,19 +186,39 @@ namespace OpenRelay.Services
                 var data = GetClipboardContent();
                 if (data != null)
                 {
-                    // Check for duplicates using hash
+                    // Calculate hash for this content
                     string newHash = CalculateContentHash(data);
+
+                    // Check if this is a duplicate of our last update
                     if (newHash == _lastContentHash)
                     {
-                        System.Diagnostics.Debug.WriteLine("[CLIPBOARD] Skipping duplicate clipboard content");
+                        System.Diagnostics.Debug.WriteLine("[CLIPBOARD] Skipping duplicate local clipboard content");
                         return;
                     }
 
-                    // Update last content hash
+                    // Check if this update was recently seen (came from another device)
+                    if (_recentlySeen.TryGetValue(newHash, out var lastSeen) &&
+                        (DateTime.Now - lastSeen) < TimeSpan.FromSeconds(1))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Local change matches recently seen remote update, ignoring");
+                        return;
+                    }
+
+                    // Update hash first so we can detect our own updates
                     _lastContentHash = newHash;
 
-                    System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected change: Format={data.Format}, Size={data.TextData?.Length ?? data.BinaryData?.Length ?? 0}");
-                    ClipboardChanged?.Invoke(this, new ClipboardChangedEventArgs(data));
+                    // Mark as recently seen to prevent echo
+                    _recentlySeen[newHash] = DateTime.Now;
+
+                    // Record timestamp of local change
+                    _lastLocalChangeTime = DateTime.Now;
+
+                    System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected local change: {newHash.Substring(0, 8)}, Format={data.Format}, Size={data.TextData?.Length ?? data.BinaryData?.Length ?? 0}");
+
+                    // Notify listeners with a small delay to prevent race conditions
+                    Task.Delay(10).ContinueWith(_ => {
+                        ClipboardChanged?.Invoke(this, new ClipboardChangedEventArgs(data));
+                    });
                 }
             }
             catch (Exception ex)
@@ -223,6 +304,21 @@ namespace OpenRelay.Services
             catch
             {
                 return Guid.NewGuid().ToString(); // Fallback unique string
+            }
+        }
+
+        /// <summary>
+        /// Clean up old entries from the recently seen dictionary
+        /// </summary>
+        private void CleanupRecentlySeen()
+        {
+            var cutoff = DateTime.Now.AddMinutes(-2);
+            foreach (var key in _recentlySeen.Keys)
+            {
+                if (_recentlySeen.TryGetValue(key, out var timestamp) && timestamp < cutoff)
+                {
+                    _recentlySeen.TryRemove(key, out _);
+                }
             }
         }
 
