@@ -82,14 +82,14 @@ namespace OpenRelay.Services
                 _isListening = true;
 
                 // Log server start
-                System.Diagnostics.Debug.WriteLine($"WebSocket server started on port {DEFAULT_PORT}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] WebSocket server started on port {DEFAULT_PORT}");
 
                 // Start listening for connections
                 await AcceptConnectionsAsync(_cancellationTokenSource.Token);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error starting network service: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error starting network service: {ex.Message}");
                 StopAsync();
                 throw;
             }
@@ -128,7 +128,7 @@ namespace OpenRelay.Services
 
             _isListening = false;
 
-            System.Diagnostics.Debug.WriteLine("WebSocket server stopped");
+            System.Diagnostics.Debug.WriteLine("[NETWORK] WebSocket server stopped");
         }
 
         /// <summary>
@@ -163,11 +163,11 @@ namespace OpenRelay.Services
             catch (Exception ex) when (ex is OperationCanceledException || cancellationToken.IsCancellationRequested)
             {
                 // Canceled, just return
-                System.Diagnostics.Debug.WriteLine("WebSocket server canceled");
+                System.Diagnostics.Debug.WriteLine("[NETWORK] WebSocket server canceled");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error accepting connections: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error accepting connections: {ex.Message}");
                 StopAsync();
             }
         }
@@ -191,14 +191,14 @@ namespace OpenRelay.Services
 
                 // Get the client's IP address
                 var ipAddress = context.Request.RemoteEndPoint.Address.ToString();
-                System.Diagnostics.Debug.WriteLine($"WebSocket connection from {ipAddress}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] WebSocket connection from {ipAddress}");
 
                 // Process messages
                 await ProcessMessagesAsync(webSocket, ipAddress, cancellationToken);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error processing WebSocket request: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing WebSocket request: {ex.Message}");
 
                 if (webSocket != null && webSocket.State == WebSocketState.Open)
                 {
@@ -218,7 +218,7 @@ namespace OpenRelay.Services
                 if (deviceId != null && _connectedClients.ContainsKey(deviceId))
                 {
                     _connectedClients.Remove(deviceId);
-                    System.Diagnostics.Debug.WriteLine($"Client {deviceId} disconnected");
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Client {deviceId} disconnected");
                 }
 
                 // Dispose the WebSocket
@@ -270,7 +270,7 @@ namespace OpenRelay.Services
 
                                 if (Enum.TryParse<MessageType>(type, true, out var messageType))
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"Received message of type {messageType}");
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message of type {messageType}");
 
                                     // Handle different message types
                                     switch (messageType)
@@ -308,7 +308,7 @@ namespace OpenRelay.Services
                                             break;
 
                                         default:
-                                            System.Diagnostics.Debug.WriteLine($"Unhandled message type: {messageType}");
+                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
                                             break;
                                     }
                                 }
@@ -316,7 +316,7 @@ namespace OpenRelay.Services
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"Error processing message: {ex.Message}");
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
 
                             // Send error response
                             var errorMessage = new ErrorMessage
@@ -334,11 +334,11 @@ namespace OpenRelay.Services
             catch (Exception ex) when (ex is OperationCanceledException || cancellationToken.IsCancellationRequested)
             {
                 // Canceled, just return
-                System.Diagnostics.Debug.WriteLine("WebSocket processing canceled");
+                System.Diagnostics.Debug.WriteLine("[NETWORK] WebSocket processing canceled");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error processing messages: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing messages: {ex.Message}");
 
                 if (webSocket.State == WebSocketState.Open)
                 {
@@ -364,7 +364,7 @@ namespace OpenRelay.Services
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
             var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
 
-            System.Diagnostics.Debug.WriteLine($"Received pairing request from {deviceName} ({deviceId})");
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId})");
 
             // Handle the pairing request
             var accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, ipAddress, DEFAULT_PORT);
@@ -400,7 +400,7 @@ namespace OpenRelay.Services
             var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
             var accepted = root.GetProperty("accepted").GetBoolean();
 
-            System.Diagnostics.Debug.WriteLine($"Received pairing response for request {requestId}: {accepted}");
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing response for request {requestId}: {accepted}");
 
             // If we have a pending request for this ID, complete it
             if (_pairingRequests.TryGetValue(requestId, out var tcs))
@@ -445,7 +445,7 @@ namespace OpenRelay.Services
             var deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
 
-            System.Diagnostics.Debug.WriteLine($"Received auth request from {deviceName} ({deviceId})");
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received auth request from {deviceName} ({deviceId})");
 
             // Check if the device is paired
             var device = _deviceManager.GetDeviceById(deviceId);
@@ -490,18 +490,22 @@ namespace OpenRelay.Services
         {
             try
             {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing clipboard update from {device.DeviceName}");
+
                 // Extract clipboard data
                 var format = root.GetProperty("format").GetString() ?? string.Empty;
                 var data = root.GetProperty("data").GetString() ?? string.Empty;
                 var isBinary = root.TryGetProperty("is_binary", out var isBinaryElement) && isBinaryElement.GetBoolean();
 
-                System.Diagnostics.Debug.WriteLine($"Received clipboard update of format {format} from {device.DeviceName}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard format: {format}, IsBinary: {isBinary}, Data length: {data.Length}");
 
                 // Decrypt the data
                 if (!string.IsNullOrEmpty(data) && !string.IsNullOrEmpty(device.SharedKey))
                 {
                     try
                     {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypting data with shared key of length {device.SharedKey.Length}");
+
                         // Create clipboard data
                         ClipboardData clipboardData;
 
@@ -509,6 +513,7 @@ namespace OpenRelay.Services
                         {
                             // Decrypt text
                             var decryptedText = _encryptionService.DecryptText(data, device.SharedKey);
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted text length: {decryptedText.Length}");
                             clipboardData = ClipboardData.CreateText(decryptedText);
                         }
                         else if (format == "image/png" && isBinary)
@@ -516,26 +521,184 @@ namespace OpenRelay.Services
                             // Decrypt binary data
                             var encryptedBytes = Convert.FromBase64String(data);
                             var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted binary length: {decryptedBytes.Length}");
                             clipboardData = ClipboardData.CreateImage(decryptedBytes);
                         }
                         else
                         {
-                            System.Diagnostics.Debug.WriteLine($"Unsupported clipboard format: {format}");
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {format}");
                             return;
                         }
 
                         // Notify listeners
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Notifying clipboard data received listeners");
                         ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error decrypting clipboard data: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting clipboard data: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No data or shared key for decryption");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling clipboard update: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Connect to a device
+        /// </summary>
+        private async Task ConnectToDeviceAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Connecting to {device.DeviceName} at {device.IpAddress}:{device.Port}");
+
+                // Create WebSocket URI
+                var uri = new Uri($"ws://{device.IpAddress}:{device.Port}");
+
+                // Create WebSocket client
+                var client = new ClientWebSocket();
+
+                // Set timeout
+                var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
+
+                // Connect to the device
+                await client.ConnectAsync(uri, linkedCts.Token);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Connected to {device.DeviceName}, sending auth message");
+
+                // Create auth message
+                var authMessage = new AuthMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName
+                };
+
+                // Send auth message
+                var json = JsonSerializer.Serialize(authMessage);
+                var buffer = Encoding.UTF8.GetBytes(json);
+
+                await client.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, linkedCts.Token);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Auth message sent to {device.DeviceName}");
+
+                // Start listening for responses
+                _ = Task.Run(async () =>
+                {
+                    await ProcessWebSocketMessagesAsync(client, device);
+                });
+
+                // Add to connected clients
+                _connectedClients[device.DeviceId] = client;
+
+                // Update device last seen
+                _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully connected to {device.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error connecting to {device.DeviceName}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Process messages from a WebSocket connection
+        /// </summary>
+        private async Task ProcessWebSocketMessagesAsync(WebSocket webSocket, PairedDevice device)
+        {
+            var buffer = new byte[16384]; // 16KB buffer
+
+            try
+            {
+                while (webSocket.State == WebSocketState.Open)
+                {
+                    var receiveResult = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+
+                    // Check if the connection is closed
+                    if (receiveResult.MessageType == WebSocketMessageType.Close)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Connection closed by {device.DeviceName}");
+
+                        // Close our side of the connection
+                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Connection closed by peer", CancellationToken.None);
+
+                        // Remove from connected clients
+                        _connectedClients.Remove(device.DeviceId);
+                        break;
+                    }
+
+                    // Handle text messages
+                    if (receiveResult.MessageType == WebSocketMessageType.Text)
+                    {
+                        var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message from {device.DeviceName}: {message.Substring(0, Math.Min(100, message.Length))}...");
+
+                        // Parse and handle the message
+                        try
+                        {
+                            var jsonDoc = JsonDocument.Parse(message);
+                            var root = jsonDoc.RootElement;
+
+                            if (root.TryGetProperty("type", out var typeProperty))
+                            {
+                                var typeStr = typeProperty.GetString() ?? string.Empty;
+
+                                if (Enum.TryParse<MessageType>(typeStr, true, out var messageType))
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Message type: {messageType}");
+
+                                    switch (messageType)
+                                    {
+                                        case MessageType.AuthSuccess:
+                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication successful with {device.DeviceName}");
+                                            break;
+
+                                        case MessageType.AuthFailed:
+                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication failed with {device.DeviceName}");
+                                            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Authentication failed", CancellationToken.None);
+                                            _connectedClients.Remove(device.DeviceId);
+                                            break;
+
+                                        case MessageType.ClipboardUpdate:
+                                            await HandleClipboardUpdateAsync(root, device, CancellationToken.None);
+                                            break;
+
+                                        default:
+                                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
+                                            break;
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error handling clipboard update: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error in WebSocket processing: {ex.Message}");
+            }
+            finally
+            {
+                // Remove from connected clients if not already removed
+                if (_connectedClients.ContainsKey(device.DeviceId))
+                {
+                    _connectedClients.Remove(device.DeviceId);
+                }
+
+                // Dispose the WebSocket
+                webSocket.Dispose();
             }
         }
 
@@ -558,7 +721,7 @@ namespace OpenRelay.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error sending message: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending message: {ex.Message}");
             }
         }
 
@@ -570,35 +733,67 @@ namespace OpenRelay.Services
             if (data == null)
                 return;
 
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Preparing to send clipboard data format={data.Format}");
+
             // Get all paired devices
             var devices = _deviceManager.GetPairedDevices();
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Found {devices.Count} paired devices");
 
+            int sentCount = 0;
             foreach (var device in devices)
             {
                 try
                 {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId})");
+
                     // Check if the device is connected
                     if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
                     {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+
+                        // Try to connect
+                        await ConnectToDeviceAsync(device, cancellationToken);
+
+                        // Check again after connection attempt
+                        if (!_connectedClients.TryGetValue(device.DeviceId, out webSocket) || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}, skipping");
+                            continue;
+                        }
+                    }
+
+                    // Check if we have a shared key
+                    if (string.IsNullOrEmpty(device.SharedKey))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}, skipping");
                         continue;
                     }
 
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting data for {device.DeviceName}");
+
                     // Encrypt the data
                     string encryptedData;
+                    bool isBinary = false;
 
                     if (data.Format == "text/plain" && data.TextData != null)
                     {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text: {data.TextData.Length} chars");
                         encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
                     }
                     else if (data.Format == "image/png" && data.BinaryData != null)
                     {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting binary: {data.BinaryData.Length} bytes");
                         var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
                         encryptedData = Convert.ToBase64String(encryptedBytes);
+                        isBinary = true;
                     }
                     else
                     {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format: {data.Format}");
                         continue;
                     }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating clipboard update message");
 
                     // Create the message
                     var message = new ClipboardUpdateMessage
@@ -607,18 +802,22 @@ namespace OpenRelay.Services
                         DeviceName = _deviceManager.LocalDeviceName,
                         Format = data.Format,
                         Data = encryptedData,
-                        IsBinary = data.Format == "image/png",
+                        IsBinary = isBinary,
                         Timestamp = data.Timestamp
                     };
 
                     // Send the message
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message to {device.DeviceName}");
                     await SendMessageAsync(webSocket, message, cancellationToken);
+                    sentCount++;
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"Error sending clipboard data to {device.DeviceName}: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data to {device.DeviceName}: {ex.Message}");
                 }
             }
+
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent to {sentCount} devices");
         }
 
         /// <summary>
@@ -628,14 +827,18 @@ namespace OpenRelay.Services
         {
             try
             {
-                System.Diagnostics.Debug.WriteLine($"Sending pairing request to {ipAddress}:{port}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {ipAddress}:{port}");
 
                 // Create a new WebSocket connection
                 var uri = new Uri($"ws://{ipAddress}:{port}");
                 using var client = new ClientWebSocket();
 
+                // Set a connection timeout
+                var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
+
                 // Connect to the device
-                await client.ConnectAsync(uri, cancellationToken);
+                await client.ConnectAsync(uri, linkedCts.Token);
 
                 // Create a pairing request message
                 var request = new PairingRequestMessage
@@ -649,7 +852,7 @@ namespace OpenRelay.Services
                 _pairingRequests[request.RequestId] = tcs;
 
                 // Send the request
-                await SendMessageAsync(client, request, cancellationToken);
+                await SendMessageAsync(client, request, linkedCts.Token);
 
                 // Start listening for the response
                 _ = Task.Run(async () =>
@@ -700,7 +903,7 @@ namespace OpenRelay.Services
                                 }
                                 catch (Exception ex)
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"Error processing pairing response: {ex.Message}");
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing pairing response: {ex.Message}");
                                     tcs.TrySetResult(false);
                                     break;
                                 }
@@ -709,7 +912,7 @@ namespace OpenRelay.Services
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error receiving pairing response: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error receiving pairing response: {ex.Message}");
                         tcs.TrySetResult(false);
                     }
                 });
@@ -722,14 +925,14 @@ namespace OpenRelay.Services
                 else
                 {
                     // Timeout
-                    System.Diagnostics.Debug.WriteLine("Pairing request timed out");
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Pairing request timed out");
                     _pairingRequests.Remove(request.RequestId);
                     return false;
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error sending pairing request: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending pairing request: {ex.Message}");
                 return false;
             }
         }

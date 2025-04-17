@@ -170,12 +170,32 @@ namespace OpenRelay
             if (e.Data == null)
                 return;
 
-            System.Diagnostics.Debug.WriteLine($"Clipboard changed: {e.Data.Format}");
+            System.Diagnostics.Debug.WriteLine($"[SYNC] Clipboard changed locally: {e.Data.Format}, sending to paired devices");
 
             // Send clipboard data to paired devices
             if (_cts != null && !_cts.IsCancellationRequested)
             {
-                Task.Run(async () => await _networkService.SendClipboardDataAsync(e.Data, _cts.Token));
+                // Get number of paired devices
+                var devices = _deviceManager.GetPairedDevices();
+                if (devices.Count == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine("[SYNC] No paired devices to send to");
+                    return;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[SYNC] Sending to {devices.Count} devices");
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _networkService.SendClipboardDataAsync(e.Data, _cts.Token);
+                        System.Diagnostics.Debug.WriteLine("[SYNC] Clipboard data sent successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SYNC] Error sending clipboard data: {ex}");
+                    }
+                });
             }
         }
 

@@ -108,13 +108,17 @@ namespace OpenRelay.Services
         private void OnClipboardChanged()
         {
             if (_isUpdatingClipboard)
+            {
+                System.Diagnostics.Debug.WriteLine("Skipping clipboard change because we're updating it ourselves");
                 return;
+            }
 
             try
             {
                 var data = GetClipboardContent();
                 if (data != null)
                 {
+                    System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected change: Format={data.Format}, Size={data.TextData?.Length ?? data.BinaryData?.Length ?? 0}");
                     ClipboardChanged?.Invoke(this, new ClipboardChangedEventArgs(data));
                 }
             }
