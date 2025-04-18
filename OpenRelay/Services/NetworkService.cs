@@ -611,7 +611,7 @@ namespace OpenRelay.Services
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
                     DeviceName = _deviceManager.LocalDeviceName,
-                    KeyId = GetCurrentKeyId() // Use local method instead
+                    KeyId = _encryptionService.GetCurrentKeyId()
                 };
 
                 // Send auth message
