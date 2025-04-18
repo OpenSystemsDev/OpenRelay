@@ -608,7 +608,6 @@ namespace OpenRelay.Services
                     return isValid;
                 };
 
-                // Set timeout to 10 seconds instead of 5
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
 
