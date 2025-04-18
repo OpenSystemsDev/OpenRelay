@@ -22,6 +22,9 @@ namespace OpenRelay
         // Cancellation token source for network operations
         private System.Threading.CancellationTokenSource? _cts;
 
+        // Timer for key rotation checks
+        private System.Threading.Timer? _keyRotationTimer;
+
         public Form1()
         {
             InitializeComponent();
@@ -61,6 +64,14 @@ namespace OpenRelay
                 _cts = new System.Threading.CancellationTokenSource();
                 Task.Run(async () => await StartNetworkServiceAsync(), _cts.Token);
 
+                // Create a timer to check for key rotations
+                _keyRotationTimer = new System.Threading.Timer(
+                    async _ => await CheckKeyRotationAsync(),
+                    null,
+                    TimeSpan.FromHours(1),  // First check after 1 hour
+                    TimeSpan.FromHours(6)   // Then check every 6 hours
+                );
+
                 // Update status
                 UpdateStatus("Connected");
             }
@@ -81,6 +92,8 @@ namespace OpenRelay
             trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
             trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
             trayMenu.Items.Add("Debug", null, DebugItem_Click);
+            trayMenu.Items.Add("-"); // Separator
+            trayMenu.Items.Add("Rotate Keys", null, RotateKeysItem_Click); // New menu item
             trayMenu.Items.Add("-"); // Separator
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
 
@@ -104,6 +117,50 @@ namespace OpenRelay
             {
                 System.Diagnostics.Debug.WriteLine($"Error starting network service: {ex.Message}");
                 UpdateStatus("Offline");
+            }
+        }
+
+        /// <summary>
+        /// Check if key rotation is needed
+        /// </summary>
+        private async Task CheckKeyRotationAsync()
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine("[KEY] Checking if key rotation is needed");
+                await _networkService.CheckAndHandleKeyRotationAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[KEY] Error checking key rotation: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle manual key rotation from menu
+        /// </summary>
+        private async void RotateKeysItem_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                // Create a new rotation key
+                uint newKeyId = _encryptionService.CreateRotationKey();
+                if (newKeyId == 0)
+                {
+                    MessageBox.Show("Failed to rotate keys", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Send key rotation update to all devices
+                await _networkService.CheckAndHandleKeyRotationAsync();
+
+                MessageBox.Show($"Keys rotated successfully. New key ID: {newKeyId}", "Success",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error rotating keys: {ex.Message}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -305,10 +362,15 @@ namespace OpenRelay
             {
                 devicesText += $"{device.DeviceName} ({device.Platform})\n";
                 devicesText += $"IP: {device.IpAddress}:{device.Port}\n";
+                devicesText += $"Key ID: {device.CurrentKeyId}\n";
                 devicesText += $"Last seen: {device.LastSeen}\n\n";
             }
 
-            MessageBox.Show(devicesText, "Paired Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // Add encryption info
+            devicesText += $"Current Key ID: {_encryptionService.GetCurrentKeyId()}\n";
+            devicesText += $"Key Rotation Needed: {(_encryptionService.ShouldRotateKey() ? "Yes" : "No")}\n";
+
+            MessageBox.Show(devicesText, "Debug Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ShowDevices()
@@ -340,6 +402,9 @@ namespace OpenRelay
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Cancel key rotation timer
+            _keyRotationTimer?.Dispose();
+
             // Cancel network operations
             _cts?.Cancel();
 

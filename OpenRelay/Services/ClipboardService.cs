@@ -47,7 +47,7 @@ namespace OpenRelay.Services
         // Track recently seen content hashes to avoid ping-pong updates
         private ConcurrentDictionary<string, DateTime> _recentlySeen = new ConcurrentDictionary<string, DateTime>();
 
-        // Manage "cool-down" period after a local change
+        // Manage the cooldown period after a local change
         private DateTime _lastLocalChangeTime = DateTime.MinValue;
         private static readonly TimeSpan CooldownPeriod = TimeSpan.FromMilliseconds(150);
 
@@ -65,7 +65,7 @@ namespace OpenRelay.Services
             _monitorForm = new ClipboardMonitorForm();
             _monitorForm.ClipboardUpdate += (s, e) => OnClipboardChanged();
             _monitorForm.Show();
-            _monitorForm.Hide(); // Keep the form hidden but running
+            _monitorForm.Hide(); // Keep it hidden but running
 
             // Start a periodic cleanup task for the recently seen dictionary
             Task.Run(async () => {
@@ -124,7 +124,7 @@ namespace OpenRelay.Services
                     else
                     {
                         // This is a different update that arrived during our cooldown period
-                        // Let's delay it a bit to give priority to our local change
+                        // Delay it a bit to give priority to our local change
                         System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Remote update during cooldown period, delaying");
                         Task.Delay(CooldownPeriod - timeSinceLocalChange).ContinueWith(_ =>
                             UpdateClipboard(data)
@@ -196,7 +196,7 @@ namespace OpenRelay.Services
                         return;
                     }
 
-                    // Check if this update was recently seen (came from another device)
+                    // Check if this update was recently seen; came from another device
                     if (_recentlySeen.TryGetValue(newHash, out var lastSeen) &&
                         (DateTime.Now - lastSeen) < TimeSpan.FromSeconds(1))
                     {

@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.Cryptography;
+using System.IO;
 
 namespace OpenRelay.Services
 {
@@ -11,6 +13,11 @@ namespace OpenRelay.Services
     {
         private bool _initialized;
         private bool _disposed;
+
+        // Key rotation related fields
+        private uint _currentKeyId = 1;  // Start with key ID 1
+        private DateTime _lastKeyRotation;
+        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromDays(14);
 
         /// <summary>
         /// Initialize the encryption service
@@ -23,6 +30,76 @@ namespace OpenRelay.Services
                 throw new InvalidOperationException($"Failed to initialize encryption service. Error code: {result}");
             }
             _initialized = true;
+            _lastKeyRotation = DateTime.Now;
+
+            // Try to load key rotation info
+            LoadKeyRotationInfo();
+        }
+
+        /// <summary>
+        /// Load key rotation information from storage
+        /// </summary>
+        private void LoadKeyRotationInfo()
+        {
+            try
+            {
+                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                var appFolder = Path.Combine(appData, "OpenRelay");
+                var keyInfoPath = Path.Combine(appFolder, "key_rotation.dat");
+
+                if (File.Exists(keyInfoPath))
+                {
+                    // Read key info
+                    string[] lines = File.ReadAllLines(keyInfoPath);
+                    if (lines.Length >= 2)
+                    {
+                        if (uint.TryParse(lines[0], out uint keyId))
+                        {
+                            _currentKeyId = keyId;
+                        }
+
+                        if (DateTime.TryParse(lines[1], out DateTime lastRotation))
+                        {
+                            _lastKeyRotation = lastRotation;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error loading key rotation info: {ex.Message}");
+                // Use defaults if loading fails
+            }
+        }
+
+        /// <summary>
+        /// Save key rotation information to storage
+        /// </summary>
+        private void SaveKeyRotationInfo()
+        {
+            try
+            {
+                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                var appFolder = Path.Combine(appData, "OpenRelay");
+
+                if (!Directory.Exists(appFolder))
+                {
+                    Directory.CreateDirectory(appFolder);
+                }
+
+                var keyInfoPath = Path.Combine(appFolder, "key_rotation.dat");
+
+                // Write key info
+                File.WriteAllLines(keyInfoPath, new[]
+                {
+                    _currentKeyId.ToString(),
+                    _lastKeyRotation.ToString("o")  // ISO 8601 format
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error saving key rotation info: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -241,6 +318,90 @@ namespace OpenRelay.Services
                 // Free the unmanaged encrypted data and key buffers
                 Marshal.FreeHGlobal(encryptedPtr);
                 Marshal.FreeHGlobal(keyPtr);
+            }
+        }
+
+        /// <summary>
+        /// Get the current key ID
+        /// </summary>
+        public uint GetCurrentKeyId()
+        {
+            // For now, just return the current ID from memory
+            // In a future version, we'll integrate with the Rust backend
+            return _currentKeyId;
+        }
+
+        /// <summary>
+        /// Check if the current key should be rotated
+        /// </summary>
+        public bool ShouldRotateKey()
+        {
+            // Check if it's been more than the rotation interval since the last rotation
+            return DateTime.Now - _lastKeyRotation > _keyRotationInterval;
+        }
+
+        /// <summary>
+        /// Create a new rotation key
+        /// </summary>
+        public uint CreateRotationKey()
+        {
+            // Increment the key ID
+            _currentKeyId++;
+
+            // Update the last rotation time
+            _lastKeyRotation = DateTime.Now;
+
+            // Save the key rotation info
+            SaveKeyRotationInfo();
+
+            return _currentKeyId;
+        }
+
+        /// <summary>
+        /// Get a key update package
+        /// </summary>
+        public byte[] GetKeyUpdatePackage(uint lastKnownId)
+        {
+            // This is a simplified implementation that just returns the current key ID
+            // and a timestamp in binary format
+            using (MemoryStream ms = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(ms))
+            {
+                writer.Write(_currentKeyId);
+                writer.Write((long)(_lastKeyRotation - DateTime.UnixEpoch).TotalSeconds);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>
+        /// Import a key update package
+        /// </summary>
+        public uint ImportKeyUpdatePackage(byte[] package)
+        {
+            if (package == null || package.Length < 12)  // 4 bytes for ID + 8 bytes for timestamp
+            {
+                return 0;
+            }
+
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(package))
+                using (BinaryReader reader = new BinaryReader(ms))
+                {
+                    _currentKeyId = reader.ReadUInt32();
+                    long timestamp = reader.ReadInt64();
+                    _lastKeyRotation = DateTime.UnixEpoch.AddSeconds(timestamp);
+
+                    // Save the key rotation info
+                    SaveKeyRotationInfo();
+
+                    return _currentKeyId;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error importing key update package: {ex.Message}");
+                return 0;
             }
         }
 

@@ -55,6 +55,7 @@ namespace OpenRelay.Services
 
         // File path for storing paired devices
         private readonly string _storageFilePath;
+        private readonly string _secureStorageFilePath;
 
         // Encryption service for generating keys
         private readonly EncryptionService _encryptionService;
@@ -77,6 +78,7 @@ namespace OpenRelay.Services
             }
 
             _storageFilePath = Path.Combine(appFolder, "paired_devices.json");
+            _secureStorageFilePath = Path.Combine(appFolder, "secured_device_data.bin");
 
             // Try to load device ID from file if it exists
             var deviceIdFilePath = Path.Combine(appFolder, "device_id.txt");
@@ -107,12 +109,53 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Load paired devices from storage
+        /// Load paired devices from storage securely
         /// </summary>
         private void LoadPairedDevices()
         {
             try
             {
+                // First check for secure storage file
+                if (File.Exists(_secureStorageFilePath))
+                {
+                    try
+                    {
+                        // Read the encrypted data
+                        byte[] encryptedData = File.ReadAllBytes(_secureStorageFilePath);
+
+                        // Create a master device key if we don't have one
+                        if (!File.Exists(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin")))
+                        {
+                            var master_key = _encryptionService.GenerateKey();
+                            SecureStoreString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"), master_key);
+                        }
+
+                        // Get the master key
+                        string masterKey = SecureRetrieveString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"));
+
+                        // Decrypt the data
+                        byte[] decryptedData = _encryptionService.DecryptData(encryptedData, Convert.FromBase64String(masterKey));
+                        string json = System.Text.Encoding.UTF8.GetString(decryptedData);
+
+                        // Deserialize the devices
+                        var devices = JsonSerializer.Deserialize<List<PairedDevice>>(json);
+                        if (devices != null)
+                        {
+                            _pairedDevices.Clear();
+                            _pairedDevices.AddRange(devices);
+
+                            System.Diagnostics.Debug.WriteLine($"[DEVICE] Loaded {devices.Count} devices from secure storage");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[DEVICE] Error loading secure storage: {ex.Message}");
+                        // Fall back to regular storage
+                    }
+                }
+
+                // Fall back to regular storage
                 if (File.Exists(_storageFilePath))
                 {
                     var json = File.ReadAllText(_storageFilePath);
@@ -122,6 +165,9 @@ namespace OpenRelay.Services
                     {
                         _pairedDevices.Clear();
                         _pairedDevices.AddRange(devices);
+
+                        // Migrate to secure storage
+                        SavePairedDevices();
                     }
                 }
             }
@@ -132,7 +178,7 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Save paired devices to storage
+        /// Save paired devices to secure storage
         /// </summary>
         private void SavePairedDevices()
         {
@@ -144,11 +190,122 @@ namespace OpenRelay.Services
                 };
 
                 var json = JsonSerializer.Serialize(_pairedDevices, options);
-                File.WriteAllText(_storageFilePath, json);
+
+                // Create a master device key if we don't have one
+                if (!File.Exists(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin")))
+                {
+                    var master_key = _encryptionService.GenerateKey();
+                    SecureStoreString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"), master_key);
+                }
+
+                // Get the master key
+                string masterKey = SecureRetrieveString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"));
+
+                // Encrypt the data
+                byte[] jsonBytes = System.Text.Encoding.UTF8.GetBytes(json);
+                byte[] encryptedData = _encryptionService.EncryptData(jsonBytes, Convert.FromBase64String(masterKey));
+
+                // Save the encrypted data
+                File.WriteAllBytes(_secureStorageFilePath, encryptedData);
+
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] Saved {_pairedDevices.Count} devices to secure storage");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error saving paired devices: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Error saving paired devices securely: {ex.Message}");
+
+                // Fall back to regular storage
+                try
+                {
+                    var options = new JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    };
+
+                    var json = JsonSerializer.Serialize(_pairedDevices, options);
+                    File.WriteAllText(_storageFilePath, json);
+                }
+                catch (Exception fallbackEx)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error in fallback device save: {fallbackEx.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Securely store a string using DPAPI or similar
+        /// </summary>
+        private void SecureStoreString(string path, string data)
+        {
+            try
+            {
+#if WINDOWS
+                // Use Windows DPAPI
+                byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
+                byte[] protectedData = System.Security.Cryptography.ProtectedData.Protect(
+                    dataBytes,
+                    null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(path, protectedData);
+#else
+                // For non-Windows platforms, encrypt using our own service
+                // with a key derived from a system-specific value
+                byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
+                
+                // Create a device-specific key based on machine ID and user
+                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
+                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
+                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
+                
+                // Encrypt with this key
+                byte[] encryptedData = _encryptionService.EncryptData(dataBytes, deviceKeyBytes);
+                File.WriteAllBytes(path, encryptedData);
+#endif
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error securely storing data: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Securely retrieve a string using DPAPI or similar
+        /// </summary>
+        private string SecureRetrieveString(string path)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    throw new FileNotFoundException("Secure data file not found", path);
+                }
+
+                byte[] protectedData = File.ReadAllBytes(path);
+
+#if WINDOWS
+                // Use Windows DPAPI
+                byte[] dataBytes = System.Security.Cryptography.ProtectedData.Unprotect(
+                    protectedData,
+                    null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return System.Text.Encoding.UTF8.GetString(dataBytes);
+#else
+                // For non-Windows platforms, decrypt using our own service
+                // with a key derived from a system-specific value
+                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
+                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
+                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
+                
+                // Decrypt with this key
+                byte[] decryptedData = _encryptionService.DecryptData(protectedData, deviceKeyBytes);
+                return System.Text.Encoding.UTF8.GetString(decryptedData);
+#endif
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error securely retrieving data: {ex.Message}");
+                throw;
             }
         }
 
@@ -199,6 +356,7 @@ namespace OpenRelay.Services
                 existingDevice.Port = device.Port;
                 existingDevice.Platform = device.Platform;
                 existingDevice.SharedKey = device.SharedKey;
+                existingDevice.CurrentKeyId = device.CurrentKeyId;
                 existingDevice.LastSeen = DateTime.Now;
 
                 // Notify listeners
@@ -216,6 +374,28 @@ namespace OpenRelay.Services
 
             // Save changes
             SavePairedDevices();
+        }
+
+        /// <summary>
+        /// Update a device
+        /// </summary>
+        public void UpdateDevice(PairedDevice device)
+        {
+            var existingDevice = _pairedDevices.FirstOrDefault(d => d.DeviceId == device.DeviceId);
+            if (existingDevice != null)
+            {
+                // Find the index of the existing device
+                int index = _pairedDevices.IndexOf(existingDevice);
+
+                // Replace with the updated device
+                _pairedDevices[index] = device;
+
+                // Notify listeners
+                DeviceUpdated?.Invoke(this, new DeviceEventArgs(device));
+
+                // Save changes
+                SavePairedDevices();
+            }
         }
 
         /// <summary>
@@ -278,6 +458,7 @@ namespace OpenRelay.Services
                     Port = port,
                     Platform = "Unknown", // Could be determined later
                     SharedKey = _encryptionService.GenerateKey(),
+                    CurrentKeyId = _encryptionService.GetCurrentKeyId(), // Set current key ID
                     LastSeen = DateTime.Now
                 };
 

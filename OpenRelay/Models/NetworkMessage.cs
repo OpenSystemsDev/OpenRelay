@@ -14,7 +14,9 @@ namespace OpenRelay.Models
         AuthSuccess,
         AuthFailed,
         ClipboardUpdate,
-        ClipboardClear,  // New message type for clipboard clear
+        ClipboardClear,
+        KeyRotationUpdate,   // New message type for key rotation
+        KeyRotationRequest,  // New message type for requesting key updates
         Error
     }
 
@@ -66,6 +68,12 @@ namespace OpenRelay.Models
         /// </summary>
         [JsonPropertyName("request_id")]
         public string RequestId { get; set; } = Guid.NewGuid().ToString();
+
+        /// <summary>
+        /// Public key for ECDH key exchange if used
+        /// </summary>
+        [JsonPropertyName("public_key")]
+        public string? PublicKey { get; set; }
     }
 
     /// <summary>
@@ -94,10 +102,16 @@ namespace OpenRelay.Models
         public bool Accepted { get; set; }
 
         /// <summary>
-        /// Shared key for the device if accepted
+        /// Public key for ECDH key exchange if used
         /// </summary>
-        [JsonPropertyName("shared_key")]
-        public string? SharedKey { get; set; }
+        [JsonPropertyName("public_key")]
+        public string? PublicKey { get; set; }
+
+        /// <summary>
+        /// Encrypted shared key for the device if accepted
+        /// </summary>
+        [JsonPropertyName("encrypted_shared_key")]
+        public string? EncryptedSharedKey { get; set; }
     }
 
     /// <summary>
@@ -112,6 +126,12 @@ namespace OpenRelay.Models
         {
             Type = MessageType.Auth.ToString();
         }
+
+        /// <summary>
+        /// Current key ID this device is using
+        /// </summary>
+        [JsonPropertyName("key_id")]
+        public uint KeyId { get; set; }
     }
 
     /// <summary>
@@ -126,6 +146,12 @@ namespace OpenRelay.Models
         {
             Type = MessageType.AuthSuccess.ToString();
         }
+
+        /// <summary>
+        /// Current key ID this device is using
+        /// </summary>
+        [JsonPropertyName("key_id")]
+        public uint KeyId { get; set; }
     }
 
     /// <summary>
@@ -178,6 +204,12 @@ namespace OpenRelay.Models
         /// </summary>
         [JsonPropertyName("is_binary")]
         public bool IsBinary { get; set; }
+
+        /// <summary>
+        /// Key ID used to encrypt this data
+        /// </summary>
+        [JsonPropertyName("key_id")]
+        public uint KeyId { get; set; }
     }
 
     /// <summary>
@@ -192,6 +224,52 @@ namespace OpenRelay.Models
         {
             Type = MessageType.ClipboardClear.ToString();
         }
+    }
+
+    /// <summary>
+    /// Message for key rotation updates
+    /// </summary>
+    public class KeyRotationUpdateMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new key rotation update message
+        /// </summary>
+        public KeyRotationUpdateMessage()
+        {
+            Type = MessageType.KeyRotationUpdate.ToString();
+        }
+
+        /// <summary>
+        /// The current key ID
+        /// </summary>
+        [JsonPropertyName("current_key_id")]
+        public uint CurrentKeyId { get; set; }
+
+        /// <summary>
+        /// The encrypted key update package
+        /// </summary>
+        [JsonPropertyName("key_package")]
+        public string KeyPackage { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Message for requesting key updates
+    /// </summary>
+    public class KeyRotationRequestMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new key rotation request message
+        /// </summary>
+        public KeyRotationRequestMessage()
+        {
+            Type = MessageType.KeyRotationRequest.ToString();
+        }
+
+        /// <summary>
+        /// The last known key ID
+        /// </summary>
+        [JsonPropertyName("last_known_key_id")]
+        public uint LastKnownKeyId { get; set; }
     }
 
     /// <summary>

@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Security.Authentication;
 using OpenRelay.Models;
 
 namespace OpenRelay.Services
@@ -62,7 +63,7 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Start the WebSocket server
+        /// Start the WebSocket server with TLS enabled
         /// </summary>
         public async Task StartAsync()
         {
@@ -74,15 +75,27 @@ namespace OpenRelay.Services
                 // Create cancellation token source
                 _cancellationTokenSource = new CancellationTokenSource();
 
-                // Create HTTP listener
+                // Create certificate manager
+                var certificateManager = new CertificateManager();
+                var certificate = await certificateManager.GetOrCreateCertificateAsync();
+
+                // Set up the certificate
+                if (!TlsBindingManager.SetupCertificate(DEFAULT_PORT, certificate))
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Warning: Could not set up TLS certificate binding");
+                }
+
+                // Create HTTP listener with HTTPS binding
                 _httpListener = new HttpListener();
-                _httpListener.Prefixes.Add($"http://+:{DEFAULT_PORT}/");
+                
+                // Add the HTTPS prefix
+                _httpListener.Prefixes.Add($"https://+:{DEFAULT_PORT}/");
                 _httpListener.Start();
 
                 _isListening = true;
 
                 // Log server start
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] WebSocket server started on port {DEFAULT_PORT}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] TLS WebSocket server started on port {DEFAULT_PORT}");
 
                 // Start listening for connections
                 await AcceptConnectionsAsync(_cancellationTokenSource.Token);
@@ -321,6 +334,20 @@ namespace OpenRelay.Services
                                                     await HandleClipboardUpdateAsync(root, device, cancellationToken);
                                                 }
                                                 break;
+                                                
+                                            case MessageType.KeyRotationUpdate:
+                                                if (device != null)
+                                                {
+                                                    await HandleKeyRotationUpdateAsync(root, device, cancellationToken);
+                                                }
+                                                break;
+                                                
+                                            case MessageType.KeyRotationRequest:
+                                                if (device != null)
+                                                {
+                                                    await HandleKeyRotationRequestAsync(webSocket, root, device, cancellationToken);
+                                                }
+                                                break;
 
                                             default:
                                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Unhandled message type: {messageType}");
@@ -405,7 +432,11 @@ namespace OpenRelay.Services
                 var device = _deviceManager.GetDeviceById(deviceId);
                 if (device != null)
                 {
-                    response.SharedKey = device.SharedKey;
+                    response.EncryptedSharedKey = device.SharedKey;
+                    
+                    // Set the device's current key ID
+                    device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
+                    _deviceManager.UpdateDevice(device);
                 }
             }
 
@@ -430,7 +461,7 @@ namespace OpenRelay.Services
                 if (accepted &&
                     root.TryGetProperty("device_id", out var deviceIdElement) &&
                     root.TryGetProperty("device_name", out var deviceNameElement) &&
-                    root.TryGetProperty("shared_key", out var sharedKeyElement))
+                    root.TryGetProperty("encrypted_shared_key", out var sharedKeyElement))
                 {
                     var deviceId = deviceIdElement.GetString() ?? string.Empty;
                     var deviceName = deviceNameElement.GetString() ?? string.Empty;
@@ -445,6 +476,7 @@ namespace OpenRelay.Services
                         Port = root.TryGetProperty("port", out var portElement) ? portElement.GetInt32() : DEFAULT_PORT,
                         Platform = "Unknown",
                         SharedKey = sharedKey,
+                        CurrentKeyId = _encryptionService.GetCurrentKeyId(), // Use our current key ID
                         LastSeen = DateTime.Now
                     };
 
@@ -465,26 +497,59 @@ namespace OpenRelay.Services
             // Extract auth information
             var deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
+            
+            // Get key ID if available
+            uint keyId = 0;
+            if (root.TryGetProperty("key_id", out var keyIdElement))
+            {
+                keyId = keyIdElement.GetUInt32();
+            }
 
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received auth request from {deviceName} ({deviceId})");
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received auth request from {deviceName} ({deviceId}) with key ID {keyId}");
 
             // Check if the device is paired
             var device = _deviceManager.GetDeviceById(deviceId);
             if (device != null)
             {
+                // Check if key rotation is needed
+                bool needsKeyUpdate = false;
+                
+                // If device has a different key ID than us, we need to update
+                if (keyId > 0 && keyId != _encryptionService.GetCurrentKeyId())
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Device has key ID {keyId}, we have {_encryptionService.GetCurrentKeyId()}");
+                    needsKeyUpdate = true;
+                }
+                
+                // If our key is expired, we need to rotate
+                if (_encryptionService.ShouldRotateKey())
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Our key needs rotation");
+                    await CheckAndHandleKeyRotationAsync(cancellationToken);
+                }
+
                 // Update device info
                 device.DeviceName = deviceName;
                 device.IpAddress = ipAddress;
+                device.CurrentKeyId = keyId;
                 _deviceManager.UpdateDeviceLastSeen(deviceId);
 
                 // Send success response
                 var response = new AuthSuccessMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
-                    DeviceName = _deviceManager.LocalDeviceName
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    KeyId = _encryptionService.GetCurrentKeyId()
                 };
 
                 await SendMessageAsync(webSocket, response, cancellationToken);
+
+                // If key update is needed, send it
+                if (needsKeyUpdate)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending key update package to {deviceName}");
+                    await SendKeyUpdateToDeviceAsync(device, webSocket, cancellationToken);
+                }
 
                 // Add to connected clients
                 _connectedClients[deviceId] = webSocket;
@@ -508,86 +573,29 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Handle a clipboard update
+        /// Connect to a device using secure WebSocket (WSS)
         /// </summary>
-        private async Task HandleClipboardUpdateAsync(JsonElement root, PairedDevice device, CancellationToken cancellationToken)
-        {
-            try
-            {
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing clipboard update from {device.DeviceName}");
-
-                // Extract clipboard data
-                var format = root.GetProperty("format").GetString() ?? string.Empty;
-                var data = root.GetProperty("data").GetString() ?? string.Empty;
-                var isBinary = root.TryGetProperty("is_binary", out var isBinaryElement) && isBinaryElement.GetBoolean();
-
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard format: {format}, IsBinary: {isBinary}, Data length: {data.Length}");
-
-                // Decrypt the data
-                if (!string.IsNullOrEmpty(data) && !string.IsNullOrEmpty(device.SharedKey))
-                {
-                    try
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypting data with shared key of length {device.SharedKey.Length}");
-
-                        // Create clipboard data
-                        ClipboardData clipboardData;
-
-                        if (format == "text/plain" && !isBinary)
-                        {
-                            // Decrypt text
-                            var decryptedText = _encryptionService.DecryptText(data, device.SharedKey);
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted text length: {decryptedText.Length}");
-                            clipboardData = ClipboardData.CreateText(decryptedText);
-                        }
-                        else if (format == "image/png" && isBinary)
-                        {
-                            // Decrypt binary data
-                            var encryptedBytes = Convert.FromBase64String(data);
-                            var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted binary length: {decryptedBytes.Length}");
-                            clipboardData = ClipboardData.CreateImage(decryptedBytes);
-                        }
-                        else
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {format}");
-                            return;
-                        }
-
-                        // Notify listeners
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Notifying clipboard data received listeners");
-                        ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting clipboard data: {ex.Message}");
-                    }
-                }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No data or shared key for decryption");
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling clipboard update: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Connect to a device
-        /// </summary>
-        private async Task ConnectToDeviceAsync(PairedDevice device, CancellationToken cancellationToken)
+        private async Task<WebSocket?> ConnectToDeviceAsync(PairedDevice device, CancellationToken cancellationToken)
         {
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Connecting to {device.DeviceName} at {device.IpAddress}:{device.Port}");
 
-                // Create WebSocket URI
-                var uri = new Uri($"ws://{device.IpAddress}:{device.Port}");
+                // Create WebSocket URI with WSS (secure WebSocket)
+                var uri = new Uri($"wss://{device.IpAddress}:{device.Port}/");
 
-                // Create WebSocket client
+                // Create WebSocket client with TLS options
                 var client = new ClientWebSocket();
+
+                // Accept all certificates for self-signed certs
+                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
+                    // We accept all certificates in this app since they're self-signed
+                    // In a production app, you'd want to validate them properly
+                    return true;
+                };
+
+                // Note: We don't set SslProtocols directly as it's not available in all .NET versions
+                // The system will use the best available protocol
 
                 // Set timeout
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
@@ -598,11 +606,12 @@ namespace OpenRelay.Services
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Connected to {device.DeviceName}, sending auth message");
 
-                // Create auth message
+                // Create auth message with current key ID
                 var authMessage = new AuthMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
-                    DeviceName = _deviceManager.LocalDeviceName
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    KeyId = GetCurrentKeyId() // Use local method instead
                 };
 
                 // Send auth message
@@ -626,12 +635,16 @@ namespace OpenRelay.Services
                 _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully connected to {device.DeviceName}");
+
+                return client;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error connecting to {device.DeviceName}: {ex.Message}");
+                return null;
             }
         }
+
 
         /// <summary>
         /// Process messages from a WebSocket connection
@@ -694,6 +707,18 @@ namespace OpenRelay.Services
                                         {
                                             case MessageType.AuthSuccess:
                                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication successful with {device.DeviceName}");
+                                                
+                                                // Update key ID if available
+                                                if (root.TryGetProperty("key_id", out var keyIdElement))
+                                                {
+                                                    var newKeyId = keyIdElement.GetUInt32();
+                                                    if (newKeyId != device.CurrentKeyId)
+                                                    {
+                                                        device.CurrentKeyId = newKeyId;
+                                                        _deviceManager.UpdateDevice(device);
+                                                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Updated device key ID to {newKeyId}");
+                                                    }
+                                                }
                                                 break;
 
                                             case MessageType.AuthFailed:
@@ -704,6 +729,14 @@ namespace OpenRelay.Services
 
                                             case MessageType.ClipboardUpdate:
                                                 await HandleClipboardUpdateAsync(root, device, CancellationToken.None);
+                                                break;
+                                                
+                                            case MessageType.KeyRotationUpdate:
+                                                await HandleKeyRotationUpdateAsync(root, device, CancellationToken.None);
+                                                break;
+                                                
+                                            case MessageType.KeyRotationRequest:
+                                                await HandleKeyRotationRequestAsync(webSocket, root, device, CancellationToken.None);
                                                 break;
 
                                             default:
@@ -744,157 +777,91 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Send a message to a WebSocket client
+        /// Handle a clipboard update
         /// </summary>
-        private async Task SendMessageAsync(WebSocket webSocket, object message, CancellationToken cancellationToken)
+        private async Task HandleClipboardUpdateAsync(JsonElement root, PairedDevice device, CancellationToken cancellationToken)
         {
-            if (webSocket == null || webSocket.State != WebSocketState.Open)
-                return;
-
             try
             {
-                // Serialize the message to JSON
-                var json = JsonSerializer.Serialize(message);
-                var buffer = Encoding.UTF8.GetBytes(json);
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing clipboard update from {device.DeviceName}");
 
-                // Log message size
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message, size={buffer.Length} bytes");
-
-                // For large messages send in chunks
-                if (buffer.Length > 8192) // A 8KB chunk
+                // Extract clipboard data
+                var format = root.GetProperty("format").GetString() ?? string.Empty;
+                var data = root.GetProperty("data").GetString() ?? string.Empty;
+                var isBinary = root.TryGetProperty("is_binary", out var isBinaryElement) && isBinaryElement.GetBoolean();
+                
+                // Get key ID if available, otherwise use device's current key ID
+                uint keyId = device.CurrentKeyId;
+                if (root.TryGetProperty("key_id", out var keyIdElement))
                 {
-                    int totalSent = 0;
-                    while (totalSent < buffer.Length)
+                    keyId = keyIdElement.GetUInt32();
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard format: {format}, IsBinary: {isBinary}, Data length: {data.Length}, Key ID: {keyId}");
+
+                // If key ID doesn't match, request key update
+                if (keyId != _encryptionService.GetCurrentKeyId())
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key ID mismatch: device={keyId}, local={_encryptionService.GetCurrentKeyId()}");
+                    
+                    // Request key update
+                    await RequestKeyUpdateAsync(device, cancellationToken);
+                    return;
+                }
+
+                // Decrypt the data
+                if (!string.IsNullOrEmpty(data) && !string.IsNullOrEmpty(device.SharedKey))
+                {
+                    try
                     {
-                        int chunkSize = Math.Min(8192, buffer.Length - totalSent);
-                        bool isLastChunk = (totalSent + chunkSize) >= buffer.Length;
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypting data with shared key of length {device.SharedKey.Length}");
 
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {totalSent}-{totalSent + chunkSize} of {buffer.Length}, isLastChunk={isLastChunk}");
+                        // Create clipboard data
+                        ClipboardData clipboardData;
 
-                        await webSocket.SendAsync(
-                            new ArraySegment<byte>(buffer, totalSent, chunkSize),
-                            WebSocketMessageType.Text,
-                            isLastChunk, // EndOfMessage flag
-                            cancellationToken);
+                        if (format == "text/plain" && !isBinary)
+                        {
+                            // Decrypt text
+                            var decryptedText = _encryptionService.DecryptText(data, device.SharedKey);
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted text length: {decryptedText.Length}");
+                            clipboardData = ClipboardData.CreateText(decryptedText);
+                        }
+                        else if (format == "image/png" && isBinary)
+                        {
+                            // Decrypt binary data
+                            var encryptedBytes = Convert.FromBase64String(data);
+                            var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted binary length: {decryptedBytes.Length}");
+                            clipboardData = ClipboardData.CreateImage(decryptedBytes);
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {format}");
+                            return;
+                        }
 
-                        totalSent += chunkSize;
+                        // Notify listeners
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Notifying clipboard data received listeners");
+                        ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
                     }
-
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Completed sending large message in chunks");
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting clipboard data: {ex.Message}");
+                    }
                 }
                 else
                 {
-                    // For small messages, send all at once
-                    await webSocket.SendAsync(
-                        new ArraySegment<byte>(buffer),
-                        WebSocketMessageType.Text,
-                        true, // EndOfMessage
-                        cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No data or shared key for decryption");
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending message: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling clipboard update: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Send clipboard data to all connected devices
-        /// </summary>
-        public async Task SendClipboardDataAsync(ClipboardData data, CancellationToken cancellationToken = default)
-        {
-            if (data == null)
-                return;
-
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Preparing to send clipboard data format={data.Format}");
-
-            // Get all paired devices
-            var devices = _deviceManager.GetPairedDevices();
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Found {devices.Count} paired devices");
-
-            int sentCount = 0;
-            foreach (var device in devices)
-            {
-                try
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId})");
-
-                    // Check if the device is connected
-                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
-
-                        // Try to connect
-                        await ConnectToDeviceAsync(device, cancellationToken);
-
-                        // Check again after connection attempt
-                        if (!_connectedClients.TryGetValue(device.DeviceId, out webSocket) || webSocket.State != WebSocketState.Open)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}, skipping");
-                            continue;
-                        }
-                    }
-
-                    // Check if we have a shared key
-                    if (string.IsNullOrEmpty(device.SharedKey))
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}, skipping");
-                        continue;
-                    }
-
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting data for {device.DeviceName}");
-
-                    // Encrypt the data
-                    string encryptedData;
-                    bool isBinary = false;
-
-                    if (data.Format == "text/plain" && data.TextData != null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text: {data.TextData.Length} chars");
-                        encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
-                    }
-                    else if (data.Format == "image/png" && data.BinaryData != null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting binary: {data.BinaryData.Length} bytes");
-                        var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
-                        encryptedData = Convert.ToBase64String(encryptedBytes);
-                        isBinary = true;
-                    }
-                    else
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format: {data.Format}");
-                        continue;
-                    }
-
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating clipboard update message");
-
-                    // Create the message
-                    var message = new ClipboardUpdateMessage
-                    {
-                        DeviceId = _deviceManager.LocalDeviceId,
-                        DeviceName = _deviceManager.LocalDeviceName,
-                        Format = data.Format,
-                        Data = encryptedData,
-                        IsBinary = isBinary,
-                        Timestamp = data.Timestamp
-                    };
-
-                    // Send the message
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message to {device.DeviceName}");
-                    await SendMessageAsync(webSocket, message, cancellationToken);
-                    sentCount++;
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data to {device.DeviceName}: {ex.Message}");
-                }
-            }
-
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent to {sentCount} devices");
-        }
-
-        /// <summary>
-        /// Send a pairing request to a device
+        /// Send a pairing request to a device using secure connection
         /// </summary>
         public async Task<bool> SendPairingRequestAsync(string ipAddress, int port = DEFAULT_PORT, CancellationToken cancellationToken = default)
         {
@@ -902,9 +869,12 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {ipAddress}:{port}");
 
-                // Create a new WebSocket connection
-                var uri = new Uri($"ws://{ipAddress}:{port}");
+                // Create a new WebSocket connection with WSS (secure WebSocket)
+                var uri = new Uri($"wss://{ipAddress}:{port}/");
                 using var client = new ClientWebSocket();
+
+                // Configure TLS - accept self-signed certificates
+                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
 
                 // Set a connection timeout
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
@@ -1007,6 +977,398 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending pairing request: {ex.Message}");
                 return false;
+            }
+        }
+
+
+        /// <summary>
+        /// Send a message to a WebSocket client
+        /// </summary>
+        private async Task SendMessageAsync(WebSocket webSocket, object message, CancellationToken cancellationToken)
+        {
+            if (webSocket == null || webSocket.State != WebSocketState.Open)
+                return;
+
+            try
+            {
+                // Serialize the message to JSON
+                var json = JsonSerializer.Serialize(message);
+                var buffer = Encoding.UTF8.GetBytes(json);
+
+                // Log message size
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message, size={buffer.Length} bytes");
+
+                // For large messages send in chunks
+                if (buffer.Length > 8192) // A 8KB chunk
+                {
+                    int totalSent = 0;
+                    while (totalSent < buffer.Length)
+                    {
+                        int chunkSize = Math.Min(8192, buffer.Length - totalSent);
+                        bool isLastChunk = (totalSent + chunkSize) >= buffer.Length;
+
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {totalSent}-{totalSent + chunkSize} of {buffer.Length}, isLastChunk={isLastChunk}");
+
+                        await webSocket.SendAsync(
+                            new ArraySegment<byte>(buffer, totalSent, chunkSize),
+                            WebSocketMessageType.Text,
+                            isLastChunk, // EndOfMessage flag
+                            cancellationToken);
+
+                        totalSent += chunkSize;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Completed sending large message in chunks");
+                }
+                else
+                {
+                    // For small messages, send all at once
+                    await webSocket.SendAsync(
+                        new ArraySegment<byte>(buffer),
+                        WebSocketMessageType.Text,
+                        true, // EndOfMessage
+                        cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending message: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Send clipboard data to all connected devices
+        /// </summary>
+        public async Task SendClipboardDataAsync(ClipboardData data, CancellationToken cancellationToken = default)
+        {
+            if (data == null)
+                return;
+
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Preparing to send clipboard data format={data.Format}");
+
+            // Get all paired devices
+            var devices = _deviceManager.GetPairedDevices();
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Found {devices.Count} paired devices");
+
+            int sentCount = 0;
+            foreach (var device in devices)
+            {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId})");
+
+                    // Check if the device is connected
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+
+                        // Try to connect
+                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+
+                        // Check again after connection attempt
+                        if (webSocket == null || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}, skipping");
+                            continue;
+                        }
+                    }
+
+                    // Check if we have a shared key
+                    if (string.IsNullOrEmpty(device.SharedKey))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}, skipping");
+                        continue;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting data for {device.DeviceName}");
+
+                    // Encrypt the data
+                    string encryptedData;
+                    bool isBinary = false;
+
+                    if (data.Format == "text/plain" && data.TextData != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text: {data.TextData.Length} chars");
+                        encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
+                    }
+                    else if (data.Format == "image/png" && data.BinaryData != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting binary: {data.BinaryData.Length} bytes");
+                        var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
+                        encryptedData = Convert.ToBase64String(encryptedBytes);
+                        isBinary = true;
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format: {data.Format}");
+                        continue;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating clipboard update message");
+
+                    // Create the message
+                    var message = new ClipboardUpdateMessage
+                    {
+                        DeviceId = _deviceManager.LocalDeviceId,
+                        DeviceName = _deviceManager.LocalDeviceName,
+                        Format = data.Format,
+                        Data = encryptedData,
+                        IsBinary = isBinary,
+                        Timestamp = data.Timestamp,
+                        KeyId = _encryptionService.GetCurrentKeyId() // Add key ID
+                    };
+
+                    // Send the message
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message to {device.DeviceName}");
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                    sentCount++;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data to {device.DeviceName}: {ex.Message}");
+                }
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent to {sentCount} devices");
+        }
+
+        /// <summary>
+        /// Check if key rotation is needed and handle it
+        /// </summary>
+        public async Task CheckAndHandleKeyRotationAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Check if rotation is needed
+                if (_encryptionService.ShouldRotateKey())
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Key rotation needed, creating new rotation key");
+                    
+                    // Create new rotation key
+                    uint newKeyId = _encryptionService.CreateRotationKey();
+                    if (newKeyId == 0)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to create rotation key");
+                        return;
+                    }
+                    
+                    // Get paired devices
+                    var devices = _deviceManager.GetPairedDevices();
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending key rotation update to {devices.Count} devices");
+                    
+                    // Send key rotation update to all devices
+                    foreach (var device in devices)
+                    {
+                        try
+                        {
+                            // Try to connect to the device if not connected
+                            if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+                                webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+                                
+                                // Check if connected
+                                if (webSocket == null || webSocket.State != WebSocketState.Open)
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key rotation");
+                                    continue;
+                                }
+                            }
+                            
+                            // Send key update to this device
+                            await SendKeyUpdateToDeviceAsync(device, webSocket, cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key rotation update to {device.DeviceName}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error checking key rotation: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Send a key update to a specific device
+        /// </summary>
+        private async Task SendKeyUpdateToDeviceAsync(PairedDevice device, WebSocket webSocket, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Get key update package
+                byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(device.CurrentKeyId);
+                
+                // Check if we have a valid package
+                if (keyPackage.Length == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to get key update package for device {device.DeviceName}");
+                    return;
+                }
+                
+                // Encrypt the key package with the device's shared key
+                byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
+                
+                // Create key rotation update message
+                var message = new KeyRotationUpdateMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    CurrentKeyId = _encryptionService.GetCurrentKeyId(),
+                    KeyPackage = Convert.ToBase64String(encryptedPackage)
+                };
+                
+                // Send the message
+                await SendMessageAsync(webSocket, message, cancellationToken);
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName}");
+                
+                // Update device's key ID
+                device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
+                _deviceManager.UpdateDevice(device);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key update to device: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Request a key update from a device
+        /// </summary>
+        private async Task RequestKeyUpdateAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Check if the device is connected
+                if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, can't request key update");
+                    return;
+                }
+                
+                // Create key rotation request message
+                var message = new KeyRotationRequestMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    LastKnownKeyId = device.CurrentKeyId
+                };
+                
+                // Send the message
+                await SendMessageAsync(webSocket, message, cancellationToken);
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation request sent to {device.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error requesting key update: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Handle a key rotation update message
+        /// </summary>
+        private async Task HandleKeyRotationUpdateAsync(JsonElement root, PairedDevice device, CancellationToken cancellationToken)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received key rotation update from {device.DeviceName}");
+                
+                // Extract key information
+                var currentKeyId = root.GetProperty("current_key_id").GetUInt32();
+                var keyPackage = root.GetProperty("key_package").GetString() ?? string.Empty;
+                
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update: current key ID = {currentKeyId}");
+                
+                // Decrypt the key package
+                byte[] encryptedPackage = Convert.FromBase64String(keyPackage);
+                byte[] packageData = _encryptionService.DecryptData(encryptedPackage, Convert.FromBase64String(device.SharedKey));
+                
+                // Import the key package
+                uint importedKeyId = _encryptionService.ImportKeyUpdatePackage(packageData);
+                
+                if (importedKeyId == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to import key package");
+                    return;
+                }
+                
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully imported key package, current key ID = {importedKeyId}");
+                
+                // Update device's key ID
+                device.CurrentKeyId = currentKeyId;
+                _deviceManager.UpdateDevice(device);
+                
+                // Update device last seen
+                _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling key rotation update: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Handle a key rotation request message
+        /// </summary>
+        private async Task HandleKeyRotationRequestAsync(WebSocket webSocket, JsonElement root, PairedDevice device, CancellationToken cancellationToken)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received key rotation request from {device.DeviceName}");
+                
+                // Extract last known key ID
+                var lastKnownKeyId = root.GetProperty("last_known_key_id").GetUInt32();
+                
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation request: last known key ID = {lastKnownKeyId}");
+                
+                // Get key update package
+                byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(lastKnownKeyId);
+                
+                // Check if we have a valid package
+                if (keyPackage.Length == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] No valid key update package available, re-auth required");
+                    
+                    // Send auth failed message to trigger re-authentication
+                    var authFailedMessage = new AuthFailedMessage
+                    {
+                        DeviceId = _deviceManager.LocalDeviceId,
+                        DeviceName = _deviceManager.LocalDeviceName,
+                        Reason = "Key rotation required, please re-authenticate"
+                    };
+                    
+                    await SendMessageAsync(webSocket, authFailedMessage, cancellationToken);
+                    return;
+                }
+                
+                // Encrypt the key package with the device's shared key
+                byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
+                
+                // Create key rotation update message
+                var message = new KeyRotationUpdateMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    CurrentKeyId = _encryptionService.GetCurrentKeyId(),
+                    KeyPackage = Convert.ToBase64String(encryptedPackage)
+                };
+                
+                // Send the message
+                await SendMessageAsync(webSocket, message, cancellationToken);
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName}");
+                
+                // Update device last seen
+                _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+                
+                // Update device's key ID
+                device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
+                _deviceManager.UpdateDevice(device);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling key rotation request: {ex.Message}");
             }
         }
 

@@ -38,9 +38,19 @@ namespace OpenRelay.Models
         public string SharedKey { get; set; } = string.Empty;
 
         /// <summary>
+        /// Current key ID for rotation
+        /// </summary>
+        public uint CurrentKeyId { get; set; }
+
+        /// <summary>
         /// Last time this device was seen
         /// </summary>
         public DateTime LastSeen { get; set; }
+
+        /// <summary>
+        /// Encrypted storage data for this device
+        /// </summary>
+        public byte[]? EncryptedStorageData { get; set; }
 
         public override string ToString()
         {
