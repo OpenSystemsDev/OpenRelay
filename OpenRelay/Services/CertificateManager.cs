@@ -24,6 +24,7 @@ namespace OpenRelay.Services
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var appFolder = Path.Combine(appData, "OpenRelay");
             var certPath = Path.Combine(appFolder, "certificate.pfx");
+            var password = "openrelay"; // Simple password for the pfx
 
             // Create directory if it doesn't exist
             if (!Directory.Exists(appFolder))
@@ -36,8 +37,10 @@ namespace OpenRelay.Services
             {
                 try
                 {
-                    // Try to load the certificate
-                    var cert = new X509Certificate2(certPath, string.Empty, X509KeyStorageFlags.Exportable);
+                    // Try to load the certificate using X509Certificate2Collection
+                    var collection = new X509Certificate2Collection();
+                    collection.Import(certPath, password, X509KeyStorageFlags.Exportable);
+                    var cert = collection[0]; // Get the first certificate in the collection
 
                     // Check if certificate is still valid
                     if (cert.NotAfter > DateTime.Now.AddMonths(1))
@@ -46,26 +49,23 @@ namespace OpenRelay.Services
                     }
 
                     // Certificate is about to expire, create a new one
+                    System.Diagnostics.Debug.WriteLine("[CERT] Certificate is expiring soon, creating a new one");
                 }
-                catch
+                catch (Exception ex)
                 {
                     // Certificate could not be loaded, create a new one
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Error loading certificate: {ex.Message}");
                 }
             }
 
             // Create a new certificate
-            var cert2 = await Task.Run(() => CreateSelfSignedCertificate());
-
-            // Save the certificate
-            File.WriteAllBytes(certPath, cert2.Export(X509ContentType.Pfx));
-
-            return cert2;
+            return await Task.Run(() => CreateSelfSignedCertificate(certPath, password));
         }
 
         /// <summary>
         /// Create a self-signed X.509 certificate
         /// </summary>
-        private X509Certificate2 CreateSelfSignedCertificate()
+        private X509Certificate2 CreateSelfSignedCertificate(string certPath, string password)
         {
             // Generate a new key pair
             using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP384);
@@ -120,11 +120,16 @@ namespace OpenRelay.Services
                 DateTimeOffset.Now.AddDays(-1), // Valid from yesterday (to avoid time zone issues)
                 DateTimeOffset.Now.AddDays(CertificateValidDays));
 
-            // Create a copy of the certificate with exportable private key
-            return new X509Certificate2(
-                cert.Export(X509ContentType.Pfx),
-                string.Empty,
-                X509KeyStorageFlags.Exportable);
+            // Export to PFX with password
+            byte[] pfxBytes = cert.Export(X509ContentType.Pfx, password);
+
+            // Save to file
+            File.WriteAllBytes(certPath, pfxBytes);
+
+            // Load the certificate using the modern approach
+            var collection = new X509Certificate2Collection();
+            collection.Import(certPath, password, X509KeyStorageFlags.Exportable);
+            return collection[0];
         }
     }
 
@@ -133,16 +138,6 @@ namespace OpenRelay.Services
     /// </summary>
     public static class TlsBindingManager
     {
-        [DllImport("httpapi.dll", SetLastError = true)]
-        private static extern uint HttpSetServiceConfiguration(
-            IntPtr serviceIntPtr,
-            int configId, // HTTP_SERVICE_CONFIG_ID
-            IntPtr configInformation,
-            int configInformationLength,
-            IntPtr overlapped);
-
-        private const int HttpServiceConfigSslCertInfo = 0;
-
         /// <summary>
         /// Set up the certificate on the given port using netsh (Windows only)
         /// </summary>
@@ -152,54 +147,73 @@ namespace OpenRelay.Services
             {
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
+                    // On non-Windows platforms, this is handled differently
                     return true;
                 }
 
-                // First register the URL ACL to allow non-admin binding
-                var urlProcess = new System.Diagnostics.Process();
-                urlProcess.StartInfo.FileName = "netsh";
-                urlProcess.StartInfo.Arguments = $"http add urlacl url=https://+:{port}/ user=Everyone";
-                urlProcess.StartInfo.UseShellExecute = false;
-                urlProcess.StartInfo.CreateNoWindow = true;
-                urlProcess.StartInfo.Verb = "runas"; // Ensure running as admin
-                urlProcess.Start();
-                urlProcess.WaitForExit();
+                // First ensure URL is registered
+                RunNetshCommand($"http add urlacl url=https://+:{port}/ user=Everyone", true);
 
-                // Try to delete any existing certificate binding
-                var deleteProcess = new System.Diagnostics.Process();
-                deleteProcess.StartInfo.FileName = "netsh";
-                deleteProcess.StartInfo.Arguments = $"http delete sslcert ipport=0.0.0.0:{port}";
-                deleteProcess.StartInfo.UseShellExecute = false;
-                deleteProcess.StartInfo.CreateNoWindow = true;
-                deleteProcess.Start();
-                deleteProcess.WaitForExit();
+                // Remove any existing certificate binding
+                RunNetshCommand($"http delete sslcert ipport=0.0.0.0:{port}", true);
 
-                // Bind the certificate
-                var process = new System.Diagnostics.Process();
-                process.StartInfo.FileName = "netsh";
-                process.StartInfo.Arguments = $"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={{D1E10C3D-0623-4B54-9A1C-9FF3C55C3EDC}}";
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.CreateNoWindow = true;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.RedirectStandardError = true;
-                process.Start();
+                // Add the certificate binding
+                string result = RunNetshCommand($"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={{D1E10C3D-0623-4B54-9A1C-9FF3C55C3EDC}}");
 
-                var output = process.StandardOutput.ReadToEnd();
-                var error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                if (process.ExitCode != 0)
+                if (result.Contains("SSL Certificate successfully added"))
                 {
-                    System.Diagnostics.Debug.WriteLine($"Failed to set up certificate: {output}\n{error}");
-                    // Continue anyway - our client code handles self-signed certificates
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Certificate binding successful for port {port}");
+                    return true;
+                }
+                else if (result.Contains("Error") || result.Contains("failed"))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Certificate binding failed: {result}");
+                    return false;
                 }
 
                 return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error setting up certificate: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[CERT] Error setting up certificate: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Run a netsh command and return the output
+        /// </summary>
+        private static string RunNetshCommand(string arguments, bool ignoreErrors = false)
+        {
+            var process = new System.Diagnostics.Process();
+            process.StartInfo.FileName = "netsh";
+            process.StartInfo.Arguments = arguments;
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.CreateNoWindow = true;
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.RedirectStandardError = true;
+
+            try
+            {
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                string error = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+
+                if (!ignoreErrors && process.ExitCode != 0)
+                {
+                    throw new Exception($"{output}\n{error}");
+                }
+
+                return output + "\n" + error;
+            }
+            catch (Exception ex)
+            {
+                if (!ignoreErrors)
+                {
+                    throw;
+                }
+                return $"Command execution failed: {ex.Message}";
             }
         }
     }
