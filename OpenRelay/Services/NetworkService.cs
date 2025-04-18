@@ -35,6 +35,9 @@ namespace OpenRelay.Services
         // Constants
         private const int DEFAULT_PORT = 9876;
 
+        // Trusted Certificates
+        private static readonly Dictionary<string, string> _trustedCertificates = new Dictionary<string, string>();
+
         // Events
         public event EventHandler<ClipboardDataReceivedEventArgs>? ClipboardDataReceived;
 
@@ -581,24 +584,32 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Connecting to {device.DeviceName} at {device.IpAddress}:{device.Port}");
 
-                // Create WebSocket URI with WSS (secure WebSocket)
                 var uri = new Uri($"wss://{device.IpAddress}:{device.Port}/");
-
-                // Create WebSocket client with TLS options
                 var client = new ClientWebSocket();
 
-                // Accept all certificates for self-signed certs
+                // Enhanced certificate validation with certificate pinning
                 client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
-                    // We accept all certificates in this app since they're self-signed
-                    // In a production app, you'd want to validate them properly
-                    return true;
+                    string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
+
+                    // First connection to this device, store the certificate
+                    if (!_trustedCertificates.TryGetValue(device.IpAddress, out var storedThumbprint))
+                    {
+                        _trustedCertificates[device.IpAddress] = thumbprint;
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Trusting certificate {thumbprint} for {device.IpAddress}");
+                        return true;
+                    }
+
+                    // For subsequent connections, verify it's the same certificate
+                    bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
+                    if (!isValid)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Certificate mismatch for {device.IpAddress}!");
+                    }
+                    return isValid;
                 };
 
-                // Note: We don't set SslProtocols directly as it's not available in all .NET versions
-                // The system will use the best available protocol
-
-                // Set timeout
-                var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
+                // Set timeout to 10 seconds instead of 5
+                var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
 
                 // Connect to the device

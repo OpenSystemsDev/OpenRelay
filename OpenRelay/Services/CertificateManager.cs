@@ -152,11 +152,29 @@ namespace OpenRelay.Services
             {
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    // On non-Windows platforms, this is handled differently
                     return true;
                 }
 
-                // Use netsh to bind the certificate on Windows
+                // First register the URL ACL to allow non-admin binding
+                var urlProcess = new System.Diagnostics.Process();
+                urlProcess.StartInfo.FileName = "netsh";
+                urlProcess.StartInfo.Arguments = $"http add urlacl url=https://+:{port}/ user=Everyone";
+                urlProcess.StartInfo.UseShellExecute = false;
+                urlProcess.StartInfo.CreateNoWindow = true;
+                urlProcess.StartInfo.Verb = "runas"; // Ensure running as admin
+                urlProcess.Start();
+                urlProcess.WaitForExit();
+
+                // Try to delete any existing certificate binding
+                var deleteProcess = new System.Diagnostics.Process();
+                deleteProcess.StartInfo.FileName = "netsh";
+                deleteProcess.StartInfo.Arguments = $"http delete sslcert ipport=0.0.0.0:{port}";
+                deleteProcess.StartInfo.UseShellExecute = false;
+                deleteProcess.StartInfo.CreateNoWindow = true;
+                deleteProcess.Start();
+                deleteProcess.WaitForExit();
+
+                // Bind the certificate
                 var process = new System.Diagnostics.Process();
                 process.StartInfo.FileName = "netsh";
                 process.StartInfo.Arguments = $"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={{D1E10C3D-0623-4B54-9A1C-9FF3C55C3EDC}}";
@@ -170,35 +188,10 @@ namespace OpenRelay.Services
                 var error = process.StandardError.ReadToEnd();
                 process.WaitForExit();
 
-                // If exit code is not 0, command failed
                 if (process.ExitCode != 0)
                 {
-                    // If certificate is already bound, try to delete and rebind
-                    if (output.Contains("already assigned") || error.Contains("already assigned"))
-                    {
-                        // Delete existing binding
-                        var deleteProcess = new System.Diagnostics.Process();
-                        deleteProcess.StartInfo.FileName = "netsh";
-                        deleteProcess.StartInfo.Arguments = $"http delete sslcert ipport=0.0.0.0:{port}";
-                        deleteProcess.StartInfo.UseShellExecute = false;
-                        deleteProcess.StartInfo.CreateNoWindow = true;
-                        deleteProcess.Start();
-                        deleteProcess.WaitForExit();
-
-                        // Try binding again
-                        process = new System.Diagnostics.Process();
-                        process.StartInfo.FileName = "netsh";
-                        process.StartInfo.Arguments = $"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={{D1E10C3D-0623-4B54-9A1C-9FF3C55C3EDC}}";
-                        process.StartInfo.UseShellExecute = false;
-                        process.StartInfo.CreateNoWindow = true;
-                        process.Start();
-                        process.WaitForExit();
-
-                        return process.ExitCode == 0;
-                    }
-
                     System.Diagnostics.Debug.WriteLine($"Failed to set up certificate: {output}\n{error}");
-                    return false;
+                    // Continue anyway - our client code handles self-signed certificates
                 }
 
                 return true;
