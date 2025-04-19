@@ -886,28 +886,8 @@ namespace OpenRelay.Services
                 var uri = new Uri($"wss://{ipAddress}:{port}/");
                 using var client = new ClientWebSocket();
 
-                // Set up certificate validation with pinning
-                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
-                    string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
-
-                    // First connection to this IP address during pairing
-                    if (!_trustedCertificates.TryGetValue(ipAddress, out var storedThumbprint))
-                    {
-                        // During pairing, we trust the first certificate encountered for this IP
-                        // The user should verify this out-of-band if possible, or accept the risk
-                        _trustedCertificates[ipAddress] = thumbprint;
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Trusting certificate {thumbprint} for {ipAddress}");
-                        return true;
-                    }
-
-                    // For subsequent connections (shouldn't happen during initial pairing request, but good practice)
-                    bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
-                    if (!isValid)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Certificate mismatch for {ipAddress}!");
-                    }
-                    return isValid;
-                };
+                // Configure TLS - accept self-signed certificates
+                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true; // TODO Shift this to enhanced validation like above
 
                 // Set a connection timeout
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
