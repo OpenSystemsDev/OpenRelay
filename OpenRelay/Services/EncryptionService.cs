@@ -15,12 +15,11 @@ namespace OpenRelay.Services
         private bool _initialized;
         private bool _disposed;
 
-        // Key rotation related fields
         private uint _currentKeyId = 1;  // Start with key ID 1
         private DateTime _lastKeyRotation;
-        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromSeconds(30); // Set to 30 seconds for testing
+        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromSeconds( 7 * 24 * 60 * 60); // 7 days
 
-        // Store multiple keys for rotation periods
+     
         private readonly Dictionary<uint, string> _encryptionKeys = new Dictionary<uint, string>();
 
         /// <summary>
@@ -93,12 +92,11 @@ namespace OpenRelay.Services
                             SecureStoreString(masterKeyPath, masterKey);
                         }
 
-                        // Read and decrypt the keys
+                        // Decrypt the keys
                         byte[] encryptedKeys = File.ReadAllBytes(keysStorePath);
                         byte[] decryptedKeys = DecryptData(encryptedKeys, Convert.FromBase64String(masterKey));
                         string keysJson = Encoding.UTF8.GetString(decryptedKeys);
 
-                        // Parse the JSON
                         var keyPairs = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(keysJson);
                         if (keyPairs != null)
                         {
@@ -171,10 +169,10 @@ namespace OpenRelay.Services
                     keyPairs[pair.Key.ToString()] = pair.Value;
                 }
 
-                // Serialize to JSON
+                // Serialize
                 string keysJson = System.Text.Json.JsonSerializer.Serialize(keyPairs);
 
-                // Encrypt the data
+                // Encrypt
                 byte[] jsonBytes = Encoding.UTF8.GetBytes(keysJson);
                 byte[] encryptedData = EncryptData(jsonBytes, Convert.FromBase64String(masterKey));
 
@@ -210,7 +208,7 @@ namespace OpenRelay.Services
                 File.WriteAllLines(keyInfoPath, new[]
                 {
                     _currentKeyId.ToString(),
-                    _lastKeyRotation.ToString("o")  // ISO 8601 format
+                    _lastKeyRotation.ToString("o")
                 });
 
                 // Also save encryption keys
@@ -395,7 +393,7 @@ namespace OpenRelay.Services
             // Encrypt the data
             byte[] encryptedBytes = EncryptData(plainBytes, Convert.FromBase64String(keyBase64));
 
-            // Convert to Base64 for easy storage/transmission
+            // Convert to Base64 for easy management
             return Convert.ToBase64String(encryptedBytes);
         }
 
@@ -580,14 +578,10 @@ namespace OpenRelay.Services
             // Increment the key ID
             _currentKeyId++;
 
-            // Generate a new key
+            // And generate a new key
             string newKey = GenerateRawKey();
             _encryptionKeys[_currentKeyId] = newKey;
-
-            // Update the last rotation time
             _lastKeyRotation = DateTime.Now;
-
-            // Save the key rotation info
             SaveKeyRotationInfo();
 
             System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Created new rotation key with ID {_currentKeyId}");
@@ -643,7 +637,7 @@ namespace OpenRelay.Services
         /// </summary>
         public uint ImportKeyUpdatePackage(byte[] package)
         {
-            if (package == null || package.Length < 16) // At minimum 4+8+4 bytes
+            if (package == null || package.Length < 16)
             {
                 return 0;
             }

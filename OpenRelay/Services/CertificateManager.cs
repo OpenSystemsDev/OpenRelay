@@ -1,10 +1,10 @@
 ﻿using System;
 using System.IO;
-using System.Linq; // Required for LINQ methods on collections
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Security.Principal; // Required for WindowsIdentity
+using System.Security.Principal;
 using System.Threading.Tasks;
 
 namespace OpenRelay.Services
@@ -28,12 +28,12 @@ namespace OpenRelay.Services
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var appFolder = Path.Combine(appData, "OpenRelay");
             var certPath = Path.Combine(appFolder, "certificate.pfx");
-            var password = "openrelay"; // Simple password for the pfx
+            var password = "CSGR@e^3EC8s5UZ0wuH@FBKcW&CAGj&N@xM6Y6CQHBGemY2KHM48@2h!g@zA8JSd"; // TODO - Create a randomly generated password, store that (encrypted) and use that password to decrypt instead of a set common password
 
             // Create directory if it doesn't exist
             Directory.CreateDirectory(appFolder);
 
-            // First, try to find the certificate in the machine store
+            // Try to find certificate 
             X509Certificate2? certificate = FindCertificateInStore();
             if (certificate != null && certificate.NotAfter > DateTime.Now.AddMonths(1))
             {
@@ -76,15 +76,15 @@ namespace OpenRelay.Services
                     else
                     {
                         System.Diagnostics.Debug.WriteLine("[CERT] Certificate loaded from PFX file is expired or expiring soon.");
-                        // Optionally delete the expired PFX file
-                        // File.Delete(certPath);
+                        // Delete the expired PFX file
+                        File.Delete(certPath);
                     }
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"[CERT] Error loading certificate from PFX: {ex.Message}. Will create a new one.");
-                    // Optionally delete the corrupted PFX file
-                    // File.Delete(certPath);
+                    // Delete the corrupted PFX file
+                    File.Delete(certPath);
                 }
             }
 
@@ -142,7 +142,7 @@ namespace OpenRelay.Services
                 File.WriteAllBytes(certPath, pfxBytes);
                 System.Diagnostics.Debug.WriteLine($"[CERT] Saved new certificate to {certPath}");
 
-                // Reload the certificate from bytes with the correct flags to ensure it's ready for store installation
+                // Reload the certificate from bytes with the correct flags to ensure it's ready for installation
                 var collection = new X509Certificate2Collection();
                 collection.Import(pfxBytes, password, flags);
                 return collection[0];
@@ -315,12 +315,11 @@ namespace OpenRelay.Services
                 RunNetshCommand($"http delete sslcert ipport=0.0.0.0:{port}", true);
 
                 // Add the certificate binding using the certificate's thumbprint
-                string appId = "{D1E10C3D-0623-4B54-9A1C-9FF3C55C3EDC}"; // Example AppId, ensure it's valid
+                string appId = "{32D816C7-17A2-45BF-9751-F596CAB0D5DD}"; // Example AppId, ensure it's valid
                 string command = $"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={appId}";
                 System.Diagnostics.Debug.WriteLine($"[CERT] Running netsh command: {command}");
-                string result = RunNetshCommand(command); // Don't ignore errors here
+                string result = RunNetshCommand(command);
 
-                // Check result carefully
                 if (result.Contains("SSL Certificate successfully added"))
                 {
                     System.Diagnostics.Debug.WriteLine($"[CERT] Certificate binding successful for port {port}");
@@ -328,7 +327,6 @@ namespace OpenRelay.Services
                 }
                 else
                 {
-                    // Log the full error from netsh
                     System.Diagnostics.Debug.WriteLine($"[CERT] Certificate binding failed. Netsh output:\n{result}");
                     // Throw an exception to make the failure explicit in logs and potentially halt startup
                     throw new Exception($"SSL Certificate add failed. Output: {result}");
@@ -358,7 +356,6 @@ namespace OpenRelay.Services
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.RedirectStandardOutput = true;
             process.StartInfo.RedirectStandardError = true;
-            // process.StartInfo.Verb = "runas"; // Usually not needed if the app is already elevated
 
             try
             {
@@ -388,7 +385,7 @@ namespace OpenRelay.Services
                 {
                     throw new Exception(errorMsg, ex);
                 }
-                return errorMsg; // Return error message if ignoring errors
+                return errorMsg;
             }
         }
 

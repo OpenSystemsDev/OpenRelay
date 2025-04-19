@@ -13,6 +13,7 @@ namespace OpenRelay
         static void Main()
         {
             // Enable better DPI scaling - this setting is crucial for 4K displays
+            // TODO this doesn't work well on 1440p sadly
             if (Environment.OSVersion.Version.Major >= 6)
             {
                 SetProcessDPIAware();
@@ -24,7 +25,7 @@ namespace OpenRelay
 
             try
             {
-                // Load the openrelay_encryption library
+                // Load the openrelay_core.dll
                 string dllPath = System.IO.Path.Combine(
                     AppDomain.CurrentDomain.BaseDirectory,
                     "openrelay_core.dll");

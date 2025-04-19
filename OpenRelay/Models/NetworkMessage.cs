@@ -15,8 +15,8 @@ namespace OpenRelay.Models
         AuthFailed,
         ClipboardUpdate,
         ClipboardClear,
-        KeyRotationUpdate,   // New message type for key rotation
-        KeyRotationRequest,  // New message type for requesting key updates
+        KeyRotationUpdate,
+        KeyRotationRequest,
         Error
     }
 
@@ -70,7 +70,7 @@ namespace OpenRelay.Models
         public string RequestId { get; set; } = Guid.NewGuid().ToString();
 
         /// <summary>
-        /// Public key for ECDH key exchange if used
+        /// Public key for ECDH key exchange if used, im gonna implement this later. Code works as of now
         /// </summary>
         [JsonPropertyName("public_key")]
         public string? PublicKey { get; set; }

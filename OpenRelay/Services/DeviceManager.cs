@@ -23,7 +23,7 @@ namespace OpenRelay.Services
             IpAddress = ipAddress;
             Port = port;
             Platform = platform;
-            Accepted = false; // Default to not accepted
+            Accepted = false;
         }
     }
 
@@ -60,7 +60,6 @@ namespace OpenRelay.Services
         private readonly string _storageFilePath;
         private readonly string _secureStorageFilePath;
 
-        // Encryption service for generating keys
         private readonly EncryptionService _encryptionService;
 
         /// <summary>
@@ -107,7 +106,6 @@ namespace OpenRelay.Services
                 File.WriteAllLines(deviceIdFilePath, new[] { LocalDeviceId, LocalDeviceName });
             }
 
-            // Load paired devices
             LoadPairedDevices();
         }
 
@@ -133,14 +131,13 @@ namespace OpenRelay.Services
                             SecureStoreString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"), master_key);
                         }
 
-                        // Get the master key
                         string masterKey = SecureRetrieveString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"));
 
-                        // Decrypt the data
+                        // Decrypt 
                         byte[] decryptedData = _encryptionService.DecryptData(encryptedData, Convert.FromBase64String(masterKey));
                         string json = System.Text.Encoding.UTF8.GetString(decryptedData);
 
-                        // Deserialize the devices
+                        // Deserialize 
                         var devices = JsonSerializer.Deserialize<List<PairedDevice>>(json);
                         if (devices != null)
                         {
@@ -154,11 +151,11 @@ namespace OpenRelay.Services
                     catch (Exception ex)
                     {
                         System.Diagnostics.Debug.WriteLine($"[DEVICE] Error loading secure storage: {ex.Message}");
-                        // Fall back to regular storage
+                        // Fallback to regular storage
                     }
                 }
 
-                // Fall back to regular storage
+                // Fallback to regular storage
                 if (File.Exists(_storageFilePath))
                 {
                     var json = File.ReadAllText(_storageFilePath);
@@ -201,10 +198,9 @@ namespace OpenRelay.Services
                     SecureStoreString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"), master_key);
                 }
 
-                // Get the master key
                 string masterKey = SecureRetrieveString(Path.Combine(Path.GetDirectoryName(_secureStorageFilePath), "master_key.bin"));
 
-                // Encrypt the data
+                // Encrypt
                 byte[] jsonBytes = System.Text.Encoding.UTF8.GetBytes(json);
                 byte[] encryptedData = _encryptionService.EncryptData(jsonBytes, Convert.FromBase64String(masterKey));
 
@@ -456,7 +452,7 @@ namespace OpenRelay.Services
             if (IsPairedDevice(deviceId))
             {
                 UpdateDeviceLastSeen(deviceId);
-                return true; // Already paired, accept automatically
+                return true; // Already paired
             }
 
             // Create event args

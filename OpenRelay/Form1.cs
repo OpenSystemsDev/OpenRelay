@@ -30,6 +30,7 @@ namespace OpenRelay
             InitializeComponent();
 
             // Enable better DPI scaling
+            // TODO this doesnt work well on 1440p sadly
             this.AutoScaleMode = AutoScaleMode.Dpi;
 
             // Set up the system tray icon
@@ -38,8 +39,8 @@ namespace OpenRelay
             // Make the form completely invisible
             this.ShowInTaskbar = false;
             this.FormBorderStyle = FormBorderStyle.FixedToolWindow;
-            this.Opacity = 0; // Make the form completely transparent
-            this.Hide(); // Hide the form completely
+            this.Opacity = 0;
+            this.Hide();
 
             // Initialize services
             try
@@ -68,8 +69,8 @@ namespace OpenRelay
                 _keyRotationTimer = new System.Threading.Timer(
                     async _ => await CheckKeyRotationAsync(),
                     null,
-                    TimeSpan.FromSeconds(5),  // First check after 5 seconds
-                    TimeSpan.FromSeconds(30)  // Then check every 30 seconds for testing
+                    TimeSpan.FromSeconds(10),
+                    TimeSpan.FromSeconds(7 * 24 * 60 * 60)
                 );
 
                 // Update status
@@ -92,14 +93,14 @@ namespace OpenRelay
             trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
             trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
             trayMenu.Items.Add("Debug", null, DebugItem_Click);
-            trayMenu.Items.Add("-"); // Separator
-            trayMenu.Items.Add("Rotate Keys", null, RotateKeysItem_Click); // New menu item
-            trayMenu.Items.Add("-"); // Separator
+            trayMenu.Items.Add("-");
+            trayMenu.Items.Add("Rotate Keys", null, RotateKeysItem_Click);
+            trayMenu.Items.Add("-");
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
 
             trayIcon = new NotifyIcon();
             trayIcon.Text = "OpenRelay";
-            trayIcon.Icon = System.Drawing.SystemIcons.Application; // Consider adding a custom icon
+            trayIcon.Icon = System.Drawing.SystemIcons.Application;
             trayIcon.ContextMenuStrip = trayMenu;
             trayIcon.Visible = true;
 
@@ -190,7 +191,6 @@ namespace OpenRelay
             {
                 dialog.ShowDialog();
 
-                // Set the result
                 e.Accepted = dialog.Accepted;
                 System.Diagnostics.Debug.WriteLine($"Pairing request {(e.Accepted ? "accepted" : "declined")}");
             }

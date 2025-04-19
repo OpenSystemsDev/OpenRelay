@@ -65,7 +65,7 @@ namespace OpenRelay.Services
             _monitorForm = new ClipboardMonitorForm();
             _monitorForm.ClipboardUpdate += (s, e) => OnClipboardChanged();
             _monitorForm.Show();
-            _monitorForm.Hide(); // Keep it hidden but running
+            _monitorForm.Hide();
 
             // Start a periodic cleanup task for the recently seen dictionary
             Task.Run(async () => {
@@ -116,7 +116,7 @@ namespace OpenRelay.Services
                 {
                     if (dataHash == _lastContentHash)
                     {
-                        // This is an echo of our own change, just mark it as seen
+                        // Just ignore it
                         System.Diagnostics.Debug.WriteLine($"[CLIPBOARD] Detected echo of our own local change during cooldown, ignoring");
                         _recentlySeen[dataHash] = DateTime.Now;
                         return;

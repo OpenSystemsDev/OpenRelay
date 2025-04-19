@@ -15,7 +15,8 @@ namespace OpenRelay.UI
         {
             InitializeComponent();
 
-            // Enable better DPI scaling
+            // Enable better DPI scaling 
+            // TODO this doesnt work well on 1440p sadly
             this.AutoScaleMode = AutoScaleMode.Dpi;
 
             // Setup form

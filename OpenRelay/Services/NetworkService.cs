@@ -75,7 +75,6 @@ namespace OpenRelay.Services
 
             try
             {
-                // Create cancellation token source
                 _cancellationTokenSource = new CancellationTokenSource();
 
                 // Create certificate manager
@@ -88,10 +87,8 @@ namespace OpenRelay.Services
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Warning: Could not set up TLS certificate binding");
                 }
 
-                // Create HTTP listener with HTTPS binding
                 _httpListener = new HttpListener();
                 
-                // Add the HTTPS prefix
                 _httpListener.Prefixes.Add($"https://+:{DEFAULT_PORT}/");
                 _httpListener.Start();
 
@@ -132,7 +129,7 @@ namespace OpenRelay.Services
                 }
                 catch
                 {
-                    // Ignore errors when closing connections
+                    // Ignore errors
                 }
             }
 
@@ -165,7 +162,7 @@ namespace OpenRelay.Services
                     // Check if it's a WebSocket request
                     if (context.Request.IsWebSocketRequest)
                     {
-                        // Process the WebSocket request
+                        // Process it
                         ProcessWebSocketRequest(context, cancellationToken);
                     }
                     else
@@ -205,7 +202,7 @@ namespace OpenRelay.Services
                 var webSocketContext = await context.AcceptWebSocketAsync(null);
                 webSocket = webSocketContext.WebSocket;
 
-                // Get the client's IP address
+                // Get the client's IP
                 var ipAddress = context.Request.RemoteEndPoint.Address.ToString();
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] WebSocket connection from {ipAddress}");
 
@@ -224,7 +221,7 @@ namespace OpenRelay.Services
                     }
                     catch
                     {
-                        // Ignore errors when closing
+                        // Ignore errors
                     }
                 }
             }
@@ -284,7 +281,7 @@ namespace OpenRelay.Services
                             var message = messageBuilder.ToString();
                             messageBuilder.Clear(); // Reset for next message
 
-                            // Log a snippet of the message (avoid logging huge messages)
+                            // Log a snippet of the message
                             int logLength = Math.Min(100, message.Length);
                             System.Diagnostics.Debug.WriteLine($"[NETWORK] Received complete message, length={message.Length}, starts with: {message.Substring(0, logLength)}...");
 
@@ -303,7 +300,7 @@ namespace OpenRelay.Services
                                     {
                                         System.Diagnostics.Debug.WriteLine($"[NETWORK] Received message of type {messageType}");
 
-                                        // Handle different message types
+                                        // Handle messages of different types
                                         switch (messageType)
                                         {
                                             case MessageType.PairingRequest:
@@ -363,7 +360,6 @@ namespace OpenRelay.Services
                             {
                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing message: {ex.Message}");
 
-                                // Send error response
                                 var errorMessage = new ErrorMessage
                                 {
                                     DeviceId = _deviceManager.LocalDeviceId,
@@ -399,7 +395,7 @@ namespace OpenRelay.Services
                     }
                     catch
                     {
-                        // Ignore errors when closing
+                        // Ignore errors
                     }
                 }
             }
@@ -415,7 +411,7 @@ namespace OpenRelay.Services
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
             var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
 
-            // Extract platform if available
+            // Extract platform if possible
             string platform = "Windows";
             if (root.TryGetProperty("platform", out var platformElement))
             {
@@ -599,7 +595,7 @@ namespace OpenRelay.Services
                 client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
                     string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
 
-                    // First connection to this device, store the certificate
+                    // First connection to this device
                     if (!_trustedCertificates.TryGetValue(device.IpAddress, out var storedThumbprint))
                     {
                         _trustedCertificates[device.IpAddress] = thumbprint;
@@ -632,7 +628,7 @@ namespace OpenRelay.Services
                     KeyId = _encryptionService.GetCurrentKeyId()
                 };
 
-                // Send auth message
+                // Send message
                 var json = JsonSerializer.Serialize(authMessage);
                 var buffer = Encoding.UTF8.GetBytes(json);
 
@@ -669,7 +665,7 @@ namespace OpenRelay.Services
         /// </summary>
         private async Task ProcessWebSocketMessagesAsync(WebSocket webSocket, PairedDevice device)
         {
-            var buffer = new byte[16384]; // 16KB buffer
+            var buffer = new byte[16384];
             StringBuilder messageBuilder = new StringBuilder();
 
             try
@@ -707,7 +703,7 @@ namespace OpenRelay.Services
                             int logLength = Math.Min(100, message.Length);
                             System.Diagnostics.Debug.WriteLine($"[NETWORK] Received complete message from {device.DeviceName}, length={message.Length}, starts with: {message.Substring(0, logLength)}...");
 
-                            // Parse and handle the message
+                            // Now handle the message
                             try
                             {
                                 var jsonDoc = JsonDocument.Parse(message);
@@ -817,12 +813,11 @@ namespace OpenRelay.Services
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard format: {format}, IsBinary: {isBinary}, Data length: {data.Length}, Key ID: {keyId}");
 
-                // If key ID doesn't match, request key update
+                // If key ID doesn't match, request an update
                 if (keyId != _encryptionService.GetCurrentKeyId())
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Key ID mismatch: device={keyId}, local={_encryptionService.GetCurrentKeyId()}");
                     
-                    // Request key update
                     await RequestKeyUpdateAsync(device, cancellationToken);
                     return;
                 }
@@ -887,12 +882,32 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {ipAddress}:{port}");
 
-                // Create a new WebSocket connection with WSS (secure WebSocket)
+                // Create a secure WSS
                 var uri = new Uri($"wss://{ipAddress}:{port}/");
                 using var client = new ClientWebSocket();
 
-                // Configure TLS - accept self-signed certificates
-                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
+                // Set up certificate validation with pinning
+                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
+                    string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
+
+                    // First connection to this IP address during pairing
+                    if (!_trustedCertificates.TryGetValue(ipAddress, out var storedThumbprint))
+                    {
+                        // During pairing, we trust the first certificate encountered for this IP
+                        // The user should verify this out-of-band if possible, or accept the risk
+                        _trustedCertificates[ipAddress] = thumbprint;
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Trusting certificate {thumbprint} for {ipAddress}");
+                        return true;
+                    }
+
+                    // For subsequent connections (shouldn't happen during initial pairing request, but good practice)
+                    bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
+                    if (!isValid)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Certificate mismatch for {ipAddress}!");
+                    }
+                    return isValid;
+                };
 
                 // Set a connection timeout
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
@@ -906,7 +921,7 @@ namespace OpenRelay.Services
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
                     DeviceName = _deviceManager.LocalDeviceName,
-                    Platform = _deviceManager.LocalPlatform  // Include platform information
+                    Platform = _deviceManager.LocalPlatform
                 };
 
                 // Create a task completion source for the response
@@ -919,7 +934,7 @@ namespace OpenRelay.Services
                 // Start listening for the response
                 _ = Task.Run(async () =>
                 {
-                    var buffer = new byte[16384]; // 16KB buffer
+                    var buffer = new byte[16384];
 
                     try
                     {
@@ -1018,7 +1033,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending message, size={buffer.Length} bytes");
 
                 // For large messages send in chunks
-                if (buffer.Length > 8192) // A 8KB chunk
+                if (buffer.Length > 8192)
                 {
                     int totalSent = 0;
                     while (totalSent < buffer.Length)
@@ -1134,7 +1149,7 @@ namespace OpenRelay.Services
                         Data = encryptedData,
                         IsBinary = isBinary,
                         Timestamp = data.Timestamp,
-                        KeyId = _encryptionService.GetCurrentKeyId() // Add key ID
+                        KeyId = _encryptionService.GetCurrentKeyId()
                     };
 
                     // Send the message
@@ -1378,7 +1393,6 @@ namespace OpenRelay.Services
                 await SendMessageAsync(webSocket, message, cancellationToken);
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName}");
                 
-                // Update device last seen
                 _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
                 
                 // Update device's key ID
