@@ -14,13 +14,15 @@ namespace OpenRelay.Services
         public string IpAddress { get; }
         public int Port { get; }
         public bool Accepted { get; set; }
+        public string Platform { get; }
 
-        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port)
+        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows")
         {
             DeviceId = deviceId;
             DeviceName = deviceName;
             IpAddress = ipAddress;
             Port = port;
+            Platform = platform;
             Accepted = false; // Default to not accepted
         }
     }
@@ -52,6 +54,7 @@ namespace OpenRelay.Services
         // Local device information
         public string LocalDeviceId { get; }
         public string LocalDeviceName { get; }
+        public string LocalPlatform { get; } = "Windows";
 
         // File path for storing paired devices
         private readonly string _storageFilePath;
@@ -430,9 +433,24 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
+        /// Extract platform info from a pairing request
+        /// </summary>
+        private string ExtractPlatform(JsonElement root)
+        {
+            // Try to extract platform from the message
+            if (root.TryGetProperty("platform", out var platformElement))
+            {
+                return platformElement.GetString() ?? "Windows";
+            }
+
+            // Default to Windows if not specified
+            return "Windows";
+        }
+
+        /// <summary>
         /// Handle a pairing request
         /// </summary>
-        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port)
+        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows")
         {
             // Check if already paired
             if (IsPairedDevice(deviceId))
@@ -442,7 +460,7 @@ namespace OpenRelay.Services
             }
 
             // Create event args
-            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port);
+            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, platform);
 
             // Notify listeners
             PairingRequestReceived?.Invoke(this, args);
@@ -456,7 +474,7 @@ namespace OpenRelay.Services
                     DeviceName = deviceName,
                     IpAddress = ipAddress,
                     Port = port,
-                    Platform = "Unknown", // Could be determined later
+                    Platform = platform,
                     SharedKey = _encryptionService.GenerateKey(),
                     CurrentKeyId = _encryptionService.GetCurrentKeyId(), // Set current key ID
                     LastSeen = DateTime.Now

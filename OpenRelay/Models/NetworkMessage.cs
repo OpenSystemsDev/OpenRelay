@@ -74,7 +74,14 @@ namespace OpenRelay.Models
         /// </summary>
         [JsonPropertyName("public_key")]
         public string? PublicKey { get; set; }
+
+        /// <summary>
+        /// Platform of the requesting device
+        /// </summary>
+        [JsonPropertyName("platform")]
+        public string Platform { get; set; } = "Windows";
     }
+
 
     /// <summary>
     /// Message for responding to a pairing request

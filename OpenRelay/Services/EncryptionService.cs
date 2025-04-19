@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Security.Cryptography;
 using System.IO;
+using System.Collections.Generic;
 
 namespace OpenRelay.Services
 {
@@ -17,7 +18,10 @@ namespace OpenRelay.Services
         // Key rotation related fields
         private uint _currentKeyId = 1;  // Start with key ID 1
         private DateTime _lastKeyRotation;
-        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromDays(14);
+        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromSeconds(30); // Set to 30 seconds for testing
+
+        // Store multiple keys for rotation periods
+        private readonly Dictionary<uint, string> _encryptionKeys = new Dictionary<uint, string>();
 
         /// <summary>
         /// Initialize the encryption service
@@ -31,6 +35,10 @@ namespace OpenRelay.Services
             }
             _initialized = true;
             _lastKeyRotation = DateTime.Now;
+
+            // Generate the initial key
+            string initialKey = GenerateRawKey();
+            _encryptionKeys[_currentKeyId] = initialKey;
 
             // Try to load key rotation info
             LoadKeyRotationInfo();
@@ -46,6 +54,7 @@ namespace OpenRelay.Services
                 var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
                 var appFolder = Path.Combine(appData, "OpenRelay");
                 var keyInfoPath = Path.Combine(appFolder, "key_rotation.dat");
+                var keysStorePath = Path.Combine(appFolder, "encryption_keys.dat");
 
                 if (File.Exists(keyInfoPath))
                 {
@@ -64,11 +73,119 @@ namespace OpenRelay.Services
                         }
                     }
                 }
+
+                // Load encryption keys
+                if (File.Exists(keysStorePath))
+                {
+                    try
+                    {
+                        // Create a temporary master key for encrypting the keys
+                        string masterKeyPath = Path.Combine(appFolder, "master_key.bin");
+                        string masterKey;
+
+                        if (File.Exists(masterKeyPath))
+                        {
+                            masterKey = SecureRetrieveString(masterKeyPath);
+                        }
+                        else
+                        {
+                            masterKey = GenerateRawKey();
+                            SecureStoreString(masterKeyPath, masterKey);
+                        }
+
+                        // Read and decrypt the keys
+                        byte[] encryptedKeys = File.ReadAllBytes(keysStorePath);
+                        byte[] decryptedKeys = DecryptData(encryptedKeys, Convert.FromBase64String(masterKey));
+                        string keysJson = Encoding.UTF8.GetString(decryptedKeys);
+
+                        // Parse the JSON
+                        var keyPairs = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(keysJson);
+                        if (keyPairs != null)
+                        {
+                            _encryptionKeys.Clear();
+                            foreach (var pair in keyPairs)
+                            {
+                                if (uint.TryParse(pair.Key, out uint keyId))
+                                {
+                                    _encryptionKeys[keyId] = pair.Value;
+                                }
+                            }
+
+                            System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Loaded {_encryptionKeys.Count} encryption keys");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Error loading encryption keys: {ex.Message}");
+                    }
+                }
+
+                // Ensure we have a key for the current key ID
+                if (!_encryptionKeys.ContainsKey(_currentKeyId))
+                {
+                    string newKey = GenerateRawKey();
+                    _encryptionKeys[_currentKeyId] = newKey;
+                    SaveEncryptionKeys();
+                }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error loading key rotation info: {ex.Message}");
                 // Use defaults if loading fails
+            }
+        }
+
+        /// <summary>
+        /// Save encryption keys securely
+        /// </summary>
+        private void SaveEncryptionKeys()
+        {
+            try
+            {
+                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                var appFolder = Path.Combine(appData, "OpenRelay");
+                var keysStorePath = Path.Combine(appFolder, "encryption_keys.dat");
+                var masterKeyPath = Path.Combine(appFolder, "master_key.bin");
+
+                if (!Directory.Exists(appFolder))
+                {
+                    Directory.CreateDirectory(appFolder);
+                }
+
+                // Get or create master key
+                string masterKey;
+                if (File.Exists(masterKeyPath))
+                {
+                    masterKey = SecureRetrieveString(masterKeyPath);
+                }
+                else
+                {
+                    masterKey = GenerateRawKey();
+                    SecureStoreString(masterKeyPath, masterKey);
+                }
+
+                // Convert keys dictionary to string-string for serialization
+                var keyPairs = new Dictionary<string, string>();
+                foreach (var pair in _encryptionKeys)
+                {
+                    keyPairs[pair.Key.ToString()] = pair.Value;
+                }
+
+                // Serialize to JSON
+                string keysJson = System.Text.Json.JsonSerializer.Serialize(keyPairs);
+
+                // Encrypt the data
+                byte[] jsonBytes = Encoding.UTF8.GetBytes(keysJson);
+                byte[] encryptedData = EncryptData(jsonBytes, Convert.FromBase64String(masterKey));
+
+                // Save the encrypted data
+                File.WriteAllBytes(keysStorePath, encryptedData);
+
+                System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Saved {_encryptionKeys.Count} encryption keys");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Error saving encryption keys: {ex.Message}");
             }
         }
 
@@ -95,6 +212,9 @@ namespace OpenRelay.Services
                     _currentKeyId.ToString(),
                     _lastKeyRotation.ToString("o")  // ISO 8601 format
                 });
+
+                // Also save encryption keys
+                SaveEncryptionKeys();
             }
             catch (Exception ex)
             {
@@ -103,10 +223,84 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Generate a new encryption key
+        /// Securely store a string using DPAPI or similar
         /// </summary>
-        /// <returns>The generated key as a Base64 string</returns>
-        public string GenerateKey()
+        private void SecureStoreString(string path, string data)
+        {
+            try
+            {
+#if WINDOWS
+                // Use Windows DPAPI
+                byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
+                byte[] protectedData = System.Security.Cryptography.ProtectedData.Protect(
+                    dataBytes,
+                    null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(path, protectedData);
+#else
+                // For non-Windows platforms, encrypt using our own service
+                byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
+                
+                // Create a device-specific key based on machine ID and user
+                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
+                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
+                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
+                
+                // Encrypt with this key
+                byte[] encryptedData = EncryptData(dataBytes, deviceKeyBytes);
+                File.WriteAllBytes(path, encryptedData);
+#endif
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error securely storing data: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Securely retrieve a string using DPAPI or similar
+        /// </summary>
+        private string SecureRetrieveString(string path)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    throw new FileNotFoundException("Secure data file not found", path);
+                }
+
+                byte[] protectedData = File.ReadAllBytes(path);
+
+#if WINDOWS
+                // Use Windows DPAPI
+                byte[] dataBytes = System.Security.Cryptography.ProtectedData.Unprotect(
+                    protectedData,
+                    null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return System.Text.Encoding.UTF8.GetString(dataBytes);
+#else
+                // For non-Windows platforms, decrypt using our own service
+                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
+                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
+                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
+                
+                // Decrypt with this key
+                byte[] decryptedData = DecryptData(protectedData, deviceKeyBytes);
+                return System.Text.Encoding.UTF8.GetString(decryptedData);
+#endif
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error securely retrieving data: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Generate a raw encryption key
+        /// </summary>
+        private string GenerateRawKey()
         {
             if (!_initialized || _disposed)
             {
@@ -135,6 +329,46 @@ namespace OpenRelay.Services
                 // Free the unmanaged key buffer
                 NativeMethods.encryption_free_buffer(keyPtr, keySize);
             }
+        }
+
+        /// <summary>
+        /// Generate a new encryption key
+        /// </summary>
+        /// <returns>The generated key as a Base64 string</returns>
+        public string GenerateKey()
+        {
+            return GenerateRawKey();
+        }
+
+        /// <summary>
+        /// Get the current encryption key
+        /// </summary>
+        private string GetCurrentKey()
+        {
+            if (_encryptionKeys.TryGetValue(_currentKeyId, out string key))
+            {
+                return key;
+            }
+
+            // If key not found, generate a new one
+            string newKey = GenerateRawKey();
+            _encryptionKeys[_currentKeyId] = newKey;
+            SaveEncryptionKeys();
+
+            return newKey;
+        }
+
+        /// <summary>
+        /// Get a specific encryption key by ID
+        /// </summary>
+        private string GetKeyById(uint keyId)
+        {
+            if (_encryptionKeys.TryGetValue(keyId, out string key))
+            {
+                return key;
+            }
+
+            throw new KeyNotFoundException($"Encryption key with ID {keyId} not found");
         }
 
         /// <summary>
@@ -326,8 +560,6 @@ namespace OpenRelay.Services
         /// </summary>
         public uint GetCurrentKeyId()
         {
-            // For now, just return the current ID from memory
-            // In a future version, we'll integrate with the Rust backend
             return _currentKeyId;
         }
 
@@ -348,12 +580,17 @@ namespace OpenRelay.Services
             // Increment the key ID
             _currentKeyId++;
 
+            // Generate a new key
+            string newKey = GenerateRawKey();
+            _encryptionKeys[_currentKeyId] = newKey;
+
             // Update the last rotation time
             _lastKeyRotation = DateTime.Now;
 
             // Save the key rotation info
             SaveKeyRotationInfo();
 
+            System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Created new rotation key with ID {_currentKeyId}");
             return _currentKeyId;
         }
 
@@ -362,13 +599,41 @@ namespace OpenRelay.Services
         /// </summary>
         public byte[] GetKeyUpdatePackage(uint lastKnownId)
         {
-            // This is a simplified implementation that just returns the current key ID
-            // and a timestamp in binary format
+            // Create a package with key information for all keys since lastKnownId
             using (MemoryStream ms = new MemoryStream())
             using (BinaryWriter writer = new BinaryWriter(ms))
             {
+                // Write the current key ID
                 writer.Write(_currentKeyId);
+
+                // Write the last rotation timestamp
                 writer.Write((long)(_lastKeyRotation - DateTime.UnixEpoch).TotalSeconds);
+
+                // Count keys to include
+                int keysToInclude = 0;
+                foreach (var keyId in _encryptionKeys.Keys)
+                {
+                    if (keyId > lastKnownId)
+                    {
+                        keysToInclude++;
+                    }
+                }
+
+                // Write the number of keys
+                writer.Write(keysToInclude);
+
+                // Write each key that is newer than lastKnownId
+                foreach (var key in _encryptionKeys)
+                {
+                    if (key.Key > lastKnownId)
+                    {
+                        writer.Write(key.Key);
+                        byte[] keyBytes = Convert.FromBase64String(key.Value);
+                        writer.Write(keyBytes.Length);
+                        writer.Write(keyBytes);
+                    }
+                }
+
                 return ms.ToArray();
             }
         }
@@ -378,7 +643,7 @@ namespace OpenRelay.Services
         /// </summary>
         public uint ImportKeyUpdatePackage(byte[] package)
         {
-            if (package == null || package.Length < 12)  // 4 bytes for ID + 8 bytes for timestamp
+            if (package == null || package.Length < 16) // At minimum 4+8+4 bytes
             {
                 return 0;
             }
@@ -388,13 +653,31 @@ namespace OpenRelay.Services
                 using (MemoryStream ms = new MemoryStream(package))
                 using (BinaryReader reader = new BinaryReader(ms))
                 {
+                    // Read the current key ID
                     _currentKeyId = reader.ReadUInt32();
+
+                    // Read the last rotation timestamp
                     long timestamp = reader.ReadInt64();
                     _lastKeyRotation = DateTime.UnixEpoch.AddSeconds(timestamp);
+
+                    // Read the number of keys
+                    int keyCount = reader.ReadInt32();
+
+                    // Read each key
+                    for (int i = 0; i < keyCount; i++)
+                    {
+                        uint keyId = reader.ReadUInt32();
+                        int keyLength = reader.ReadInt32();
+                        byte[] keyBytes = reader.ReadBytes(keyLength);
+
+                        // Store the key
+                        _encryptionKeys[keyId] = Convert.ToBase64String(keyBytes);
+                    }
 
                     // Save the key rotation info
                     SaveKeyRotationInfo();
 
+                    System.Diagnostics.Debug.WriteLine($"[ENCRYPTION] Imported {keyCount} keys, current key ID is now {_currentKeyId}");
                     return _currentKeyId;
                 }
             }

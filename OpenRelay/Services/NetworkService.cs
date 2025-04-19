@@ -415,10 +415,17 @@ namespace OpenRelay.Services
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
             var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
 
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId})");
+            // Extract platform if available
+            string platform = "Windows";
+            if (root.TryGetProperty("platform", out var platformElement))
+            {
+                platform = platformElement.GetString() ?? "Windows";
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}), platform: {platform}");
 
             // Handle the pairing request
-            var accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, ipAddress, DEFAULT_PORT);
+            var accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, ipAddress, DEFAULT_PORT, platform);
 
             // Send response
             var response = new PairingResponseMessage
@@ -436,7 +443,7 @@ namespace OpenRelay.Services
                 if (device != null)
                 {
                     response.EncryptedSharedKey = device.SharedKey;
-                    
+
                     // Set the device's current key ID
                     device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
                     _deviceManager.UpdateDevice(device);
@@ -445,6 +452,7 @@ namespace OpenRelay.Services
 
             await SendMessageAsync(webSocket, response, cancellationToken);
         }
+
 
         /// <summary>
         /// Handle a pairing response
@@ -897,7 +905,8 @@ namespace OpenRelay.Services
                 var request = new PairingRequestMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
-                    DeviceName = _deviceManager.LocalDeviceName
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    Platform = _deviceManager.LocalPlatform  // Include platform information
                 };
 
                 // Create a task completion source for the response

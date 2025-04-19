@@ -35,11 +35,11 @@ namespace OpenRelay
             // Set up the system tray icon
             SetupTrayIcon();
 
-            // Make the form invisible
+            // Make the form completely invisible
             this.ShowInTaskbar = false;
-            this.WindowState = FormWindowState.Minimized;
             this.FormBorderStyle = FormBorderStyle.FixedToolWindow;
-            this.Hide();
+            this.Opacity = 0; // Make the form completely transparent
+            this.Hide(); // Hide the form completely
 
             // Initialize services
             try
@@ -68,8 +68,8 @@ namespace OpenRelay
                 _keyRotationTimer = new System.Threading.Timer(
                     async _ => await CheckKeyRotationAsync(),
                     null,
-                    TimeSpan.FromHours(1),  // First check after 1 hour
-                    TimeSpan.FromHours(6)   // Then check every 6 hours
+                    TimeSpan.FromSeconds(5),  // First check after 5 seconds
+                    TimeSpan.FromSeconds(30)  // Then check every 30 seconds for testing
                 );
 
                 // Update status
@@ -128,7 +128,17 @@ namespace OpenRelay
             try
             {
                 System.Diagnostics.Debug.WriteLine("[KEY] Checking if key rotation is needed");
-                await _networkService.CheckAndHandleKeyRotationAsync();
+                bool needsRotation = _encryptionService.ShouldRotateKey();
+
+                if (needsRotation)
+                {
+                    System.Diagnostics.Debug.WriteLine("[KEY] Key rotation needed, performing rotation");
+                    await _networkService.CheckAndHandleKeyRotationAsync();
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("[KEY] No key rotation needed at this time");
+                }
             }
             catch (Exception ex)
             {
@@ -375,7 +385,7 @@ namespace OpenRelay
 
         private void ShowDevices()
         {
-            // Show paired devices
+            // Show paired devices using the new management dialog
             var devices = _deviceManager.GetPairedDevices();
             if (devices.Count == 0)
             {
@@ -384,14 +394,10 @@ namespace OpenRelay
                 return;
             }
 
-            var devicesText = "Paired Devices:\n\n";
-            foreach (var device in devices)
+            using (var dialog = new DeviceManagementDialog(_deviceManager))
             {
-                devicesText += $"{device.DeviceName} ({device.Platform})\n";
-                devicesText += $"Last seen: {device.LastSeen}\n\n";
+                dialog.ShowDialog();
             }
-
-            MessageBox.Show(devicesText, "Paired Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ExitItem_Click(object? sender, EventArgs e)
