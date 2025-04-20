@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "OpenRelay"
-#define MyAppVersion "1.0.0.0"
+#define MyAppVersion "1.0.0.0-rc.2"
 #define MyAppPublisher "OpenSystems"
 #define MyAppExeName "OpenRelay.exe"
 #define Platform "x64"
@@ -38,7 +38,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
-Filename: "schtasks.exe"; Parameters: "/create /tn ""OpenRelay AutoStart"" /tr ""{app}\{#MyAppExeName}"" /sc onlogon /rl HIGHEST /f"; Flags: runhidden hidewizard runascurrentuser
+Filename: "schtasks.exe"; Parameters: "/create /tn ""OpenRelay AutoStart"" /tr ""\""{app}\{#MyAppExeName}\"""" /sc onlogon /rl HIGHEST /f"; Flags: runhidden hidewizard runascurrentuser
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""OpenRelay Port 9876 (TCP-In)"" dir=in action=allow protocol=TCP localport=9876"; Flags: runhidden hidewizard
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""OpenRelay Port 9876 (TCP-Out)"" dir=out action=allow protocol=TCP localport=9876"; Flags: runhidden hidewizard
 
