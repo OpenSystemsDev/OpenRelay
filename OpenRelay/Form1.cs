@@ -69,7 +69,7 @@ namespace OpenRelay
                 _keyRotationTimer = new System.Threading.Timer(
                     async _ => await CheckKeyRotationAsync(),
                     null,
-                    TimeSpan.FromSeconds(10),
+                    TimeSpan.FromSeconds(5), // Wait 5 seconds
                     TimeSpan.FromSeconds(7 * 24 * 60 * 60)
                 );
 
