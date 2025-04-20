@@ -11,29 +11,29 @@ OpenRelay follows a hybrid architecture:
 
 ## Features
 
-- Cross-Platform and Cross-Ecosystem sync
-Effortlessly sync text and images between your devices across Windows, with planned support for Android, macOS, and Linux. No more walled gardens or platform-exclusive features.
-
-- Privacy
-Your data is yours alone. Your clipboard content is, and will never be accessed, read, or collected by anyone, including the developers of OpenRelay. End-to-end encryption isemployed to ensure that your paired devices are the only ones that can decrypt your data.
-- Low compute usage
-The use of a Rust backend for critical functions, and optimization of the codebase (to the extent that I could) ensures that the application is light on memory, compute and power.
-- No ads, tracking or analytics
-OpenRelay was built to be lightweight and private. This means that we do not, and will never serve ads, collect analytics or data about your usage of our application(s), or sell any of your information.
+- Cross-Platform and Cross-Ecosystem sync  
+    Effortlessly sync text and images between your devices across Windows, with planned support for Android, macOS, and Linux. No more walled gardens or platform-exclusive features.
+- Privacy  
+    Your data is yours alone.  
+    Your clipboard content is, and will never be accessed, read, or collected by anyone, including the developers of OpenRelay. End-to-end encryption is employed to ensure that your paired devices are the only ones that can decrypt your data.
+- Low compute usage  
+    The use of a Rust backend for critical functions, and optimization of the codebase (to the extent that I could) ensures that the application is light on memory, compute and power.
+- No ads, tracking or analytics  
+    OpenRelay was built to be lightweight and private. This means that we do not, and will never serve ads, collect analytics or data about your usage of our application(s), or sell any of your information.
 
 ## Security Standards
 OpenRelay implements a comprehensive security framework based on industry standards.
 
-- Military-Grade End-to-End Encryption:
-All clipboard data is encrypted with AES-256-GCM (NIST SP 800-38D) and only accessible by your paired devices
-- Zero knowledge architecture
-All services used simply facilitate the connection, with no knowledge of any of your data.
-- Advanced Key Management
-Keys automatically rotate every 7 days (following NIST SP 800-57 guidelines with 7-day cycles) and secure key recovery mechanisms ensure your keys are always protected and manageable.
-- FIPS 140-3 Alignment
-The use of NIST-approved algorithms is in line with the requirements for FIPS 140-3 compliance in cryptographic modules.
-- Secure Key Storage
-Sensitive data, such as the encryption keys, are stored securely, encrypted on each device.
+- Military-Grade End-to-End Encryption:  
+    All clipboard data is encrypted with AES-256-GCM (NIST SP 800-38D) and only accessible by your paired devices
+- Zero knowledge architecture  
+    All services used simply facilitate the connection, with no knowledge of any of your data.
+- Advanced Key Management  
+    Keys automatically rotate every 7 days (following NIST SP 800-57 guidelines with 7-day cycles) and secure key recovery mechanisms ensure your keys are always protected and manageable.
+- FIPS 140-3 Alignment  
+    The use of NIST-approved algorithms is in line with the requirements for FIPS 140-3 compliance in cryptographic modules.
+- Secure Key Storage  
+    Sensitive data, such as the encryption keys, are stored securely, encrypted on each device.
 
 
 ## Requirements
