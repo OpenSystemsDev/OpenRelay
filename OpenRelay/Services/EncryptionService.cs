@@ -227,7 +227,6 @@ namespace OpenRelay.Services
         {
             try
             {
-#if WINDOWS
                 // Use Windows DPAPI
                 byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
                 byte[] protectedData = System.Security.Cryptography.ProtectedData.Protect(
@@ -235,19 +234,6 @@ namespace OpenRelay.Services
                     null,
                     System.Security.Cryptography.DataProtectionScope.CurrentUser);
                 File.WriteAllBytes(path, protectedData);
-#else
-                // For non-Windows platforms, encrypt using our own service
-                byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(data);
-                
-                // Create a device-specific key based on machine ID and user
-                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
-                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
-                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
-                
-                // Encrypt with this key
-                byte[] encryptedData = EncryptData(dataBytes, deviceKeyBytes);
-                File.WriteAllBytes(path, encryptedData);
-#endif
             }
             catch (Exception ex)
             {
@@ -270,23 +256,12 @@ namespace OpenRelay.Services
 
                 byte[] protectedData = File.ReadAllBytes(path);
 
-#if WINDOWS
                 // Use Windows DPAPI
                 byte[] dataBytes = System.Security.Cryptography.ProtectedData.Unprotect(
                     protectedData,
                     null,
                     System.Security.Cryptography.DataProtectionScope.CurrentUser);
                 return System.Text.Encoding.UTF8.GetString(dataBytes);
-#else
-                // For non-Windows platforms, decrypt using our own service
-                string deviceSpecificInfo = Environment.MachineName + Environment.UserName;
-                byte[] deviceKeyBytes = System.Security.Cryptography.SHA256.Create()
-                    .ComputeHash(System.Text.Encoding.UTF8.GetBytes(deviceSpecificInfo));
-                
-                // Decrypt with this key
-                byte[] decryptedData = DecryptData(protectedData, deviceKeyBytes);
-                return System.Text.Encoding.UTF8.GetString(decryptedData);
-#endif
             }
             catch (Exception ex)
             {

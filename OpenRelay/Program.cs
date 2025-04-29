@@ -13,7 +13,6 @@ namespace OpenRelay
         static void Main()
         {
             // Enable better DPI scaling - this setting is crucial for 4K displays
-            // TODO this doesn't work well on 1440p sadly
             if (Environment.OSVersion.Version.Major >= 6)
             {
                 SetProcessDPIAware();
