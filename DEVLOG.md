@@ -19,6 +19,7 @@ Implement cross‑network clipboard sync so that a client can transfer data to p
 *   **Added:**  Functionality to sync clipboard data across networks using OpenRelay-Server, or a selfhosted server.
 Instead of using a local wss connection, the client now has one connection to the server, and the server will relay messages to all connected clients.  
 The server follows a zero-knowledge architecture, implements rate limiting to prevent abuse, supports transfer of rotated keys and pairing of devices.
+*   **Added:**  Random generation of of a password to encrypt the certificate, instead of a hardcoded string.
 *   **Issue:**  The server is consistently returning a 400 when trying to authenticate. Somethings wrong with the client or the nginx configuration on the server
 *   **Resolved:**  The nginx server was not forwarding the upgrade headers. See OpenRelay-Server for more details.  
 Removed `_webSocket.Options.SetRequestHeader()` This was overriding the clients built in headers, confusing Nginx. Now, the proper Sec‑WebSocket‑Version is being emitted (along with other headers)

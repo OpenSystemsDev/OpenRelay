@@ -378,12 +378,12 @@ namespace OpenRelay.Services
 
                         System.Diagnostics.Debug.WriteLine($"[RELAY] Received WebSocket frame: Type={result.MessageType}, EndOfMessage={result.EndOfMessage}, Count={result.Count}");
 
-                        // Log raw bytes for debugging
-                        if (result.Count > 0)
-                        {
-                            var hexBytes = BitConverter.ToString(buffer, 0, result.Count).Replace("-", " ");
-                            System.Diagnostics.Debug.WriteLine($"[RELAY] Raw bytes: {hexBytes}");
-                        }
+                        //// Log raw bytes for debugging
+                        //if (result.Count > 0)
+                        //{
+                        //    var hexBytes = BitConverter.ToString(buffer, 0, result.Count).Replace("-", " ");
+                        //    System.Diagnostics.Debug.WriteLine($"[RELAY] Raw bytes: {hexBytes}");
+                        //}
 
                         // Check if connection is closed
                         if (result.MessageType == WebSocketMessageType.Close)

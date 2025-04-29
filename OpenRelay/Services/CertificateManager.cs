@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace OpenRelay.Services
@@ -18,6 +19,8 @@ namespace OpenRelay.Services
         private const int CertificateValidDays = 365 * 2; // 2 years
         private const StoreName CertificateStoreName = StoreName.My; // Personal store
         private const StoreLocation CertificateStoreLocation = StoreLocation.LocalMachine; // Machine store
+        private const int PasswordLength = 64; // Length of the generated password
+        private const string PasswordFileName = "cert-password.bin"; // Encrypted password file name
 
         /// <summary>
         /// Get or create an X.509 certificate for TLS, ensuring it's in the machine store.
@@ -28,10 +31,13 @@ namespace OpenRelay.Services
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var appFolder = Path.Combine(appData, "OpenRelay");
             var certPath = Path.Combine(appFolder, "certificate.pfx");
-            var password = "CSGR@e^3EC8s5UZ0wuH@FBKcW&CAGj&N@xM6Y6CQHBGemY2KHM48@2h!g@zA8JSd"; // TODO - Create a randomly generated password, store that (encrypted) and use that password to decrypt instead of a set common password
+            var passwordPath = Path.Combine(appFolder, PasswordFileName);
 
             // Create directory if it doesn't exist
             Directory.CreateDirectory(appFolder);
+
+            // Get or generate the certificate password
+            string password = GetOrCreateCertificatePassword(passwordPath);
 
             // Try to find certificate 
             X509Certificate2? certificate = FindCertificateInStore();
@@ -101,6 +107,136 @@ namespace OpenRelay.Services
             }
 
             return certificate;
+        }
+
+        /// <summary>
+        /// Gets an existing certificate password from file or creates and saves a new one.
+        /// </summary>
+        private string GetOrCreateCertificatePassword(string passwordPath)
+        {
+            if (File.Exists(passwordPath))
+            {
+                try
+                {
+                    byte[] encryptedPassword = File.ReadAllBytes(passwordPath);
+                    string password = DecryptPassword(encryptedPassword);
+                    
+                    // Verify the password is non-empty and seems valid
+                    if (!string.IsNullOrEmpty(password) && password.Length >= PasswordLength)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[CERT] Successfully loaded encrypted certificate password.");
+                        return password;
+                    }
+                    
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Loaded password appears invalid. Generating new one.");
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Error loading certificate password: {ex.Message}. Generating new one.");
+                }
+            }
+
+            // Generate and save a new password
+            string newPassword = GenerateRandomPassword(PasswordLength);
+            SaveEncryptedPassword(newPassword, passwordPath);
+            System.Diagnostics.Debug.WriteLine($"[CERT] Generated and saved new certificate password.");
+            return newPassword;
+        }
+
+        /// <summary>
+        /// Generates a cryptographically secure random password.
+        /// </summary>
+        private string GenerateRandomPassword(int length)
+        {
+            const string uppercaseChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            const string lowercaseChars = "abcdefghijklmnopqrstuvwxyz";
+            const string numericChars = "0123456789";
+            const string specialChars = "!@#$%^&*()-_=+[]{}|;:,.<>?";
+            const string allChars = uppercaseChars + lowercaseChars + numericChars + specialChars;
+            
+            var random = new RNGCryptoServiceProvider();
+            var bytes = new byte[length];
+            random.GetBytes(bytes);
+            
+            var result = new StringBuilder(length);
+            
+            // Ensure at least one character from each character set
+            result.Append(uppercaseChars[bytes[0] % uppercaseChars.Length]);
+            result.Append(lowercaseChars[bytes[1] % lowercaseChars.Length]);
+            result.Append(numericChars[bytes[2] % numericChars.Length]);
+            result.Append(specialChars[bytes[3] % specialChars.Length]);
+            
+            // Fill the rest with random characters from any set
+            for (int i = 4; i < length; i++)
+            {
+                result.Append(allChars[bytes[i] % allChars.Length]);
+            }
+            
+            // Shuffle the result to avoid predictable pattern at the beginning
+            return new string(result.ToString().OrderBy(c => Guid.NewGuid()).ToArray());
+        }
+
+        /// <summary>
+        /// Encrypts and saves the certificate password using Windows Data Protection API.
+        /// </summary>
+        private void SaveEncryptedPassword(string password, string filePath)
+        {
+            try
+            {
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                byte[] encryptedPassword = EncryptPassword(passwordBytes);
+                File.WriteAllBytes(filePath, encryptedPassword);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CERT] Error saving encrypted password: {ex.Message}");
+                throw; // Re-throw as this is critical for certificate operations
+            }
+        }
+
+        /// <summary>
+        /// Encrypts data using Windows Data Protection API.
+        /// </summary>
+        private byte[] EncryptPassword(byte[] data)
+        {
+            try
+            {
+                // Use LocalMachine scope so it's accessible by any process on this machine
+                return ProtectedData.Protect(data, null, DataProtectionScope.LocalMachine);
+            }
+            catch (CryptographicException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CERT] Encryption error: {ex.Message}. Falling back to CurrentUser scope.");
+                // Fallback to CurrentUser if LocalMachine fails (requires higher privileges)
+                return ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
+            }
+        }
+
+        /// <summary>
+        /// Decrypts data using Windows Data Protection API.
+        /// </summary>
+        private string DecryptPassword(byte[] encryptedData)
+        {
+            try
+            {
+                // First try LocalMachine scope
+                byte[] decryptedBytes = ProtectedData.Unprotect(encryptedData, null, DataProtectionScope.LocalMachine);
+                return Encoding.UTF8.GetString(decryptedBytes);
+            }
+            catch (CryptographicException)
+            {
+                try
+                {
+                    // Fallback to CurrentUser scope if LocalMachine fails
+                    byte[] decryptedBytes = ProtectedData.Unprotect(encryptedData, null, DataProtectionScope.CurrentUser);
+                    return Encoding.UTF8.GetString(decryptedBytes);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CERT] Failed to decrypt password with both scopes: {ex.Message}");
+                    throw;
+                }
+            }
         }
 
         /// <summary>
@@ -315,7 +451,7 @@ namespace OpenRelay.Services
                 RunNetshCommand($"http delete sslcert ipport=0.0.0.0:{port}", true);
 
                 // Add the certificate binding using the certificate's thumbprint
-                string appId = "{32D816C7-17A2-45BF-9751-F596CAB0D5DD}"; // Example AppId, ensure it's valid
+                string appId = "{792CC563-9B97-4B7F-9EF2-0B8C6223BD93}";
                 string command = $"http add sslcert ipport=0.0.0.0:{port} certhash={certificate.Thumbprint} appid={appId}";
                 System.Diagnostics.Debug.WriteLine($"[CERT] Running netsh command: {command}");
                 string result = RunNetshCommand(command);
