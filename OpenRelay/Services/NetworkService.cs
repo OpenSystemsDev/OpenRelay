@@ -40,10 +40,12 @@ namespace OpenRelay.Services
 
         // Events
         public event EventHandler<ClipboardDataReceivedEventArgs>? ClipboardDataReceived;
+        public event EventHandler<bool>? RelayServerConnectionChanged;
 
         // Dependencies
         private readonly DeviceManager _deviceManager;
         private readonly EncryptionService _encryptionService;
+        private readonly SettingsManager _settingsManager;
 
         // WebSocket server
         private HttpListener? _httpListener;
@@ -56,14 +58,25 @@ namespace OpenRelay.Services
         // Pending pairing requests
         private readonly Dictionary<string, TaskCompletionSource<bool>> _pairingRequests = new Dictionary<string, TaskCompletionSource<bool>>();
 
+        // Relay server connection
+        private RelayConnection? _relayConnection;
+        private bool _isConnectedToRelayServer = false;
+        private readonly Dictionary<string, string> _relayDeviceIdMap = new Dictionary<string, string>(); // Maps relay IDs to local IDs
+
         /// <summary>
         /// Initialize the network service
         /// </summary>
-        public NetworkService(DeviceManager deviceManager, EncryptionService encryptionService)
+        public NetworkService(DeviceManager deviceManager, EncryptionService encryptionService, SettingsManager settingsManager)
         {
             _deviceManager = deviceManager;
             _encryptionService = encryptionService;
+            _settingsManager = settingsManager;
         }
+
+        /// <summary>
+        /// Get whether connected to relay server
+        /// </summary>
+        public bool IsConnectedToRelayServer => _isConnectedToRelayServer;
 
         /// <summary>
         /// Start the WebSocket server with TLS enabled
@@ -88,7 +101,7 @@ namespace OpenRelay.Services
                 }
 
                 _httpListener = new HttpListener();
-                
+
                 _httpListener.Prefixes.Add($"https://+:{DEFAULT_PORT}/");
                 _httpListener.Start();
 
@@ -99,6 +112,13 @@ namespace OpenRelay.Services
 
                 // Start listening for connections
                 await AcceptConnectionsAsync(_cancellationTokenSource.Token);
+
+                // Connect to relay server if enabled
+                var settings = _settingsManager.GetSettings();
+                if (settings.UseRelayServer)
+                {
+                    await ConnectToRelayServerAsync(_cancellationTokenSource.Token);
+                }
             }
             catch (Exception ex)
             {
@@ -141,7 +161,483 @@ namespace OpenRelay.Services
 
             _isListening = false;
 
+            // Disconnect from relay server
+            DisconnectFromRelayServerAsync().Wait();
+
             System.Diagnostics.Debug.WriteLine("[NETWORK] WebSocket server stopped");
+        }
+
+        /// <summary>
+        /// Connect to the relay server
+        /// </summary>
+        public async Task<bool> ConnectToRelayServerAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Get settings
+                var settings = _settingsManager.GetSettings();
+                if (!settings.UseRelayServer)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Relay server disabled in settings");
+                    return false;
+                }
+
+                // Check if already connected
+                if (_isConnectedToRelayServer && _relayConnection != null)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Already connected to relay server");
+                    return true;
+                }
+
+                // Disconnect existing connection if any
+                await DisconnectFromRelayServerAsync();
+
+                // Create new connection
+                _relayConnection = new RelayConnection(
+                    settings.RelayServerUri,
+                    _deviceManager.LocalDeviceId,
+                    _deviceManager.LocalDeviceName);
+
+                // Set up event handlers
+                _relayConnection.Connected += RelayConnection_Connected;
+                _relayConnection.Disconnected += RelayConnection_Disconnected;
+                _relayConnection.MessageReceived += RelayConnection_MessageReceived;
+
+                // Connect to server
+                bool connected = await _relayConnection.ConnectAsync(cancellationToken);
+                if (!connected)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to connect to relay server");
+                    await DisconnectFromRelayServerAsync();
+                    return false;
+                }
+
+                _isConnectedToRelayServer = true;
+                RelayServerConnectionChanged?.Invoke(this, true);
+
+                System.Diagnostics.Debug.WriteLine("[NETWORK] Connected to relay server");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error connecting to relay server: {ex.Message}");
+                await DisconnectFromRelayServerAsync();
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Disconnect from the relay server
+        /// </summary>
+        public async Task DisconnectFromRelayServerAsync()
+        {
+            if (_relayConnection != null)
+            {
+                // Remove event handlers
+                _relayConnection.Connected -= RelayConnection_Connected;
+                _relayConnection.Disconnected -= RelayConnection_Disconnected;
+                _relayConnection.MessageReceived -= RelayConnection_MessageReceived;
+
+                // Disconnect
+                await _relayConnection.DisconnectAsync();
+                _relayConnection.Dispose();
+                _relayConnection = null;
+            }
+
+            _isConnectedToRelayServer = false;
+            _relayDeviceIdMap.Clear();
+
+            RelayServerConnectionChanged?.Invoke(this, false);
+
+            System.Diagnostics.Debug.WriteLine("[NETWORK] Disconnected from relay server");
+        }
+
+        /// <summary>
+        /// Handle relay server connection
+        /// </summary>
+        private void RelayConnection_Connected(object? sender, string relayDeviceId)
+        {
+            _isConnectedToRelayServer = true;
+            RelayServerConnectionChanged?.Invoke(this, true);
+
+            System.Diagnostics.Debug.WriteLine($"[NETWORK] Connected to relay server with device ID: {relayDeviceId}");
+
+            // Update status for paired devices that use relay
+            foreach (var device in _deviceManager.GetPairedDevices())
+            {
+                if (device.IsRelayPaired)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Updating relay status for device: {device.DeviceName}");
+
+                    // TODO: Send status update to relay-paired devices
+                }
+            }
+        }
+
+        /// <summary>
+        /// Handle relay server disconnection
+        /// </summary>
+        private void RelayConnection_Disconnected(object? sender, EventArgs e)
+        {
+            _isConnectedToRelayServer = false;
+            RelayServerConnectionChanged?.Invoke(this, false);
+
+            System.Diagnostics.Debug.WriteLine("[NETWORK] Disconnected from relay server");
+        }
+
+        /// <summary>
+        /// Handle relay server message
+        /// </summary>
+        private void RelayConnection_MessageReceived(object? sender, RelayMessageEventArgs e)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received relay message from {e.SenderId}");
+
+                // Decrypt the message
+                byte[] data = Convert.FromBase64String(e.EncryptedData);
+
+                // Find the device by relay ID
+                PairedDevice? device = null;
+                foreach (var d in _deviceManager.GetPairedDevices())
+                {
+                    if (d.IsRelayPaired && d.RelayDeviceId == e.SenderId)
+                    {
+                        device = d;
+                        break;
+                    }
+                }
+
+                if (device == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown relay device: {e.SenderId}");
+                    return;
+                }
+
+                // Try to decrypt the data
+                try
+                {
+                    string decryptedJson = Encoding.UTF8.GetString(data);
+                    var jsonDoc = JsonDocument.Parse(decryptedJson);
+                    var root = jsonDoc.RootElement;
+
+                    if (root.TryGetProperty("type", out var typeProperty))
+                    {
+                        string messageType = typeProperty.GetString() ?? string.Empty;
+
+                        // Check message type
+                        switch (messageType)
+                        {
+                            case "ClipboardUpdate":
+                                HandleRelayClipboardUpdateAsync(root, device);
+                                break;
+
+                            case "PairingRequest":
+                                HandleRelayPairingRequestAsync(root, e.SenderId);
+                                break;
+
+                            case "PairingResponse":
+                                HandleRelayPairingResponseAsync(root);
+                                break;
+
+                            case "KeyRotationUpdate":
+                                HandleRelayKeyRotationUpdateAsync(root, device);
+                                break;
+
+                            default:
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown relay message type: {messageType}");
+                                break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing relay message: {ex.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling relay message: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle relay clipboard update
+        /// </summary>
+        private void HandleRelayClipboardUpdateAsync(JsonElement root, PairedDevice device)
+        {
+            try
+            {
+                if (root.TryGetProperty("payload", out var payloadProperty))
+                {
+                    // Extract clipboard data
+                    var format = payloadProperty.GetProperty("format").GetString() ?? string.Empty;
+                    var data = payloadProperty.GetProperty("data").GetString() ?? string.Empty;
+                    var isBinary = payloadProperty.TryGetProperty("is_binary", out var isBinaryElement) && isBinaryElement.GetBoolean();
+
+                    // Get key ID if available
+                    uint keyId = device.CurrentKeyId;
+                    if (payloadProperty.TryGetProperty("key_id", out var keyIdElement))
+                    {
+                        keyId = keyIdElement.GetUInt32();
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Relay clipboard format: {format}, IsBinary: {isBinary}, Key ID: {keyId}");
+
+                    // Decrypt the data
+                    if (!string.IsNullOrEmpty(data) && !string.IsNullOrEmpty(device.SharedKey))
+                    {
+                        try
+                        {
+                            // Create clipboard data
+                            ClipboardData clipboardData;
+
+                            if (format == "text/plain" && !isBinary)
+                            {
+                                // Decrypt text
+                                var decryptedText = _encryptionService.DecryptText(data, device.SharedKey);
+                                clipboardData = ClipboardData.CreateText(decryptedText);
+                            }
+                            else if (format == "image/png" && isBinary)
+                            {
+                                // Decrypt binary data
+                                var encryptedBytes = Convert.FromBase64String(data);
+                                var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
+                                clipboardData = ClipboardData.CreateImage(decryptedBytes);
+                            }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format via relay: {format}");
+                                return;
+                            }
+
+                            // Notify listeners
+                            ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting relay clipboard data: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling relay clipboard update: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle relay pairing request
+        /// </summary>
+        private async Task HandleRelayPairingRequestAsync(JsonElement root, string senderRelayId)
+        {
+            try
+            {
+                // Extract device info
+                var deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
+                var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
+                var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
+
+                // Get platform if available
+                string platform = "Windows";
+                if (root.TryGetProperty("platform", out var platformElement))
+                {
+                    platform = platformElement.GetString() ?? "Windows";
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Relay pairing request from {deviceName} ({deviceId})");
+
+                // Store mapping between relay ID and device ID
+                _relayDeviceIdMap[senderRelayId] = deviceId;
+
+                // Handle the pairing request
+                var accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", DEFAULT_PORT, platform);
+
+                if (accepted)
+                {
+                    // Update device to mark as relay paired
+                    var device = _deviceManager.GetDeviceById(deviceId);
+                    if (device != null)
+                    {
+                        device.IsRelayPaired = true;
+                        device.RelayDeviceId = senderRelayId;
+                        _deviceManager.UpdateDevice(device);
+                    }
+                }
+
+                // Send response
+                await SendRelayPairingResponseAsync(deviceId, senderRelayId, requestId, accepted);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling relay pairing request: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Send relay pairing response
+        /// </summary>
+        private async Task SendRelayPairingResponseAsync(string deviceId, string recipientRelayId, string requestId, bool accepted)
+        {
+            if (_relayConnection == null || !_isConnectedToRelayServer)
+                return;
+
+            try
+            {
+                // Create response
+                var response = new
+                {
+                    type = "PairingResponse",
+                    device_id = _deviceManager.LocalDeviceId,
+                    device_name = _deviceManager.LocalDeviceName,
+                    request_id = requestId,
+                    accepted = accepted
+                };
+
+                // If accepted, include the shared key
+                if (accepted)
+                {
+                    var device = _deviceManager.GetDeviceById(deviceId);
+                    if (device != null)
+                    {
+                        var responseWithKey = new
+                        {
+                            type = "PairingResponse",
+                            device_id = _deviceManager.LocalDeviceId,
+                            device_name = _deviceManager.LocalDeviceName,
+                            request_id = requestId,
+                            accepted = true,
+                            encrypted_shared_key = device.SharedKey,
+                            platform = _deviceManager.LocalPlatform
+                        };
+
+                        // Send via relay server
+                        await _relayConnection.SendMessageAsync(recipientRelayId, "PairingResponse", responseWithKey);
+                    }
+                }
+                else
+                {
+                    // Send rejection
+                    await _relayConnection.SendMessageAsync(recipientRelayId, "PairingResponse", response);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending relay pairing response: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle relay pairing response
+        /// </summary>
+        private async Task HandleRelayPairingResponseAsync(JsonElement root)
+        {
+            try
+            {
+                // Extract response info
+                var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
+                var accepted = root.GetProperty("accepted").GetBoolean();
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Relay pairing response for request {requestId}: {accepted}");
+
+                // Check if we have a pending request
+                if (_pairingRequests.TryGetValue(requestId, out var tcs))
+                {
+                    // If accepted, get device info and shared key
+                    if (accepted &&
+                        root.TryGetProperty("device_id", out var deviceIdElement) &&
+                        root.TryGetProperty("device_name", out var deviceNameElement) &&
+                        root.TryGetProperty("encrypted_shared_key", out var sharedKeyElement))
+                    {
+                        var deviceId = deviceIdElement.GetString() ?? string.Empty;
+                        var deviceName = deviceNameElement.GetString() ?? string.Empty;
+                        var sharedKey = sharedKeyElement.GetString() ?? string.Empty;
+
+                        // Get relay device ID if available
+                        string senderRelayId = string.Empty;
+                        if (root.TryGetProperty("sender_relay_id", out var senderRelayIdElement))
+                        {
+                            senderRelayId = senderRelayIdElement.GetString() ?? string.Empty;
+                        }
+
+                        // Get platform if available
+                        string platform = "Windows";
+                        if (root.TryGetProperty("platform", out var platformElement))
+                        {
+                            platform = platformElement.GetString() ?? "Windows";
+                        }
+
+                        // Create and add device
+                        var device = new PairedDevice
+                        {
+                            DeviceId = deviceId,
+                            DeviceName = deviceName,
+                            IpAddress = "relay", // Use "relay" to indicate relay connection
+                            Port = DEFAULT_PORT,
+                            Platform = platform,
+                            SharedKey = sharedKey,
+                            CurrentKeyId = _encryptionService.GetCurrentKeyId(),
+                            LastSeen = DateTime.Now,
+                            IsRelayPaired = true,
+                            RelayDeviceId = senderRelayId
+                        };
+
+                        _deviceManager.AddOrUpdateDevice(device);
+                    }
+
+                    // Complete the task
+                    tcs.TrySetResult(accepted);
+                    _pairingRequests.Remove(requestId);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling relay pairing response: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle relay key rotation update
+        /// </summary>
+        private async Task HandleRelayKeyRotationUpdateAsync(JsonElement root, PairedDevice device)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received key rotation update via relay from {device.DeviceName}");
+
+                // Extract key information
+                var currentKeyId = root.GetProperty("current_key_id").GetUInt32();
+                var keyPackage = root.GetProperty("key_package").GetString() ?? string.Empty;
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update via relay: current key ID = {currentKeyId}");
+
+                // Decrypt the key package
+                byte[] encryptedPackage = Convert.FromBase64String(keyPackage);
+                byte[] packageData = _encryptionService.DecryptData(encryptedPackage, Convert.FromBase64String(device.SharedKey));
+
+                // Import the key package
+                uint importedKeyId = _encryptionService.ImportKeyUpdatePackage(packageData);
+
+                if (importedKeyId == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to import key package via relay");
+                    return;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully imported key package via relay, current key ID = {importedKeyId}");
+
+                // Update device's key ID
+                device.CurrentKeyId = currentKeyId;
+                _deviceManager.UpdateDevice(device);
+
+                // Update device last seen
+                _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling key rotation update via relay: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -334,14 +830,14 @@ namespace OpenRelay.Services
                                                     await HandleClipboardUpdateAsync(root, device, cancellationToken);
                                                 }
                                                 break;
-                                                
+
                                             case MessageType.KeyRotationUpdate:
                                                 if (device != null)
                                                 {
                                                     await HandleKeyRotationUpdateAsync(root, device, cancellationToken);
                                                 }
                                                 break;
-                                                
+
                                             case MessageType.KeyRotationRequest:
                                                 if (device != null)
                                                 {
@@ -504,7 +1000,7 @@ namespace OpenRelay.Services
             // Extract auth information
             var deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
             var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
-            
+
             // Get key ID if available
             uint keyId = 0;
             if (root.TryGetProperty("key_id", out var keyIdElement))
@@ -520,14 +1016,14 @@ namespace OpenRelay.Services
             {
                 // Check if key rotation is needed
                 bool needsKeyUpdate = false;
-                
+
                 // If device has a different key ID than us, we need to update
                 if (keyId > 0 && keyId != _encryptionService.GetCurrentKeyId())
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Device has key ID {keyId}, we have {_encryptionService.GetCurrentKeyId()}");
                     needsKeyUpdate = true;
                 }
-                
+
                 // If our key is expired, we need to rotate
                 if (_encryptionService.ShouldRotateKey())
                 {
@@ -584,6 +1080,26 @@ namespace OpenRelay.Services
         /// </summary>
         private async Task<WebSocket?> ConnectToDeviceAsync(PairedDevice device, CancellationToken cancellationToken)
         {
+            // If this is a relay-paired device, handle differently
+            if (device.IsRelayPaired)
+            {
+                // Check relay connection
+                if (!_isConnectedToRelayServer || _relayConnection == null)
+                {
+                    // Try to connect to relay server
+                    bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                    if (!connected)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot connect to relay-paired device {device.DeviceName} - relay server not connected");
+                        return null;
+                    }
+                }
+
+                // For relay devices, we don't need a direct WebSocket connection
+                // Instead, return a dummy WebSocket for compatibility
+                return null;
+            }
+
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Connecting to {device.DeviceName} at {device.IpAddress}:{device.Port}");
@@ -721,7 +1237,7 @@ namespace OpenRelay.Services
                                         {
                                             case MessageType.AuthSuccess:
                                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Authentication successful with {device.DeviceName}");
-                                                
+
                                                 // Update key ID if available
                                                 if (root.TryGetProperty("key_id", out var keyIdElement))
                                                 {
@@ -744,11 +1260,11 @@ namespace OpenRelay.Services
                                             case MessageType.ClipboardUpdate:
                                                 await HandleClipboardUpdateAsync(root, device, CancellationToken.None);
                                                 break;
-                                                
+
                                             case MessageType.KeyRotationUpdate:
                                                 await HandleKeyRotationUpdateAsync(root, device, CancellationToken.None);
                                                 break;
-                                                
+
                                             case MessageType.KeyRotationRequest:
                                                 await HandleKeyRotationRequestAsync(webSocket, root, device, CancellationToken.None);
                                                 break;
@@ -803,7 +1319,7 @@ namespace OpenRelay.Services
                 var format = root.GetProperty("format").GetString() ?? string.Empty;
                 var data = root.GetProperty("data").GetString() ?? string.Empty;
                 var isBinary = root.TryGetProperty("is_binary", out var isBinaryElement) && isBinaryElement.GetBoolean();
-                
+
                 // Get key ID if available, otherwise use device's current key ID
                 uint keyId = device.CurrentKeyId;
                 if (root.TryGetProperty("key_id", out var keyIdElement))
@@ -817,7 +1333,7 @@ namespace OpenRelay.Services
                 if (keyId != _encryptionService.GetCurrentKeyId())
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Key ID mismatch: device={keyId}, local={_encryptionService.GetCurrentKeyId()}");
-                    
+
                     await RequestKeyUpdateAsync(device, cancellationToken);
                     return;
                 }
@@ -876,8 +1392,14 @@ namespace OpenRelay.Services
         /// <summary>
         /// Send a pairing request to a device using secure connection
         /// </summary>
-        public async Task<bool> SendPairingRequestAsync(string ipAddress, int port = DEFAULT_PORT, CancellationToken cancellationToken = default)
+        public async Task<bool> SendPairingRequestAsync(string ipAddress, bool useRelay = false, int port = DEFAULT_PORT, CancellationToken cancellationToken = default)
         {
+            // Handle relay pairing differently
+            if (useRelay)
+            {
+                return await SendRelayPairingRequestAsync(ipAddress, cancellationToken);
+            }
+
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {ipAddress}:{port}");
@@ -1014,6 +1536,61 @@ namespace OpenRelay.Services
             }
         }
 
+        /// <summary>
+        /// Send a pairing request via the relay server
+        /// </summary>
+        private async Task<bool> SendRelayPairingRequestAsync(string targetDeviceId, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Check if connected to relay server
+                if (!_isConnectedToRelayServer || _relayConnection == null)
+                {
+                    // Try to connect
+                    bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                    if (!connected)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[NETWORK] Cannot send relay pairing request, not connected to relay server");
+                        return false;
+                    }
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending relay pairing request to {targetDeviceId}");
+
+                // Create pairing request
+                var request = new PairingRequestMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    Platform = _deviceManager.LocalPlatform
+                };
+
+                // Create task completion source for response
+                var tcs = new TaskCompletionSource<bool>();
+                _pairingRequests[request.RequestId] = tcs;
+
+                // Send request via relay server
+                await _relayConnection.SendMessageAsync(targetDeviceId, "PairingRequest", request);
+
+                // Wait for response with timeout
+                if (await Task.WhenAny(tcs.Task, Task.Delay(30000, cancellationToken)) == tcs.Task)
+                {
+                    return await tcs.Task;
+                }
+                else
+                {
+                    // Timeout
+                    System.Diagnostics.Debug.WriteLine("[NETWORK] Relay pairing request timed out");
+                    _pairingRequests.Remove(request.RequestId);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending relay pairing request: {ex.Message}");
+                return false;
+            }
+        }
 
         /// <summary>
         /// Send a message to a WebSocket client
@@ -1091,6 +1668,14 @@ namespace OpenRelay.Services
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId})");
 
+                    // Handle relay devices separately
+                    if (device.IsRelayPaired)
+                    {
+                        await SendClipboardDataViaRelayAsync(data, device, cancellationToken);
+                        sentCount++;
+                        continue;
+                    }
+
                     // Check if the device is connected
                     if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
                     {
@@ -1167,6 +1752,96 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
+        /// Send clipboard data via relay server
+        /// </summary>
+        private async Task SendClipboardDataViaRelayAsync(ClipboardData data, PairedDevice device, CancellationToken cancellationToken)
+        {
+            if (data == null || !device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+            {
+                System.Diagnostics.Debug.WriteLine("[NETWORK] Invalid relay device or data");
+                return;
+            }
+
+            // Check relay connection
+            if (!_isConnectedToRelayServer || _relayConnection == null)
+            {
+                // Try to connect to relay server
+                bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                if (!connected)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot send data to {device.DeviceName} - relay server not connected");
+                    return;
+                }
+            }
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending clipboard data via relay to {device.DeviceName}");
+
+                // Check if we have a shared key
+                if (string.IsNullOrEmpty(device.SharedKey))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}, skipping");
+                    return;
+                }
+
+                // Encrypt the data
+                string encryptedData;
+                bool isBinary = false;
+
+                if (data.Format == "text/plain" && data.TextData != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text for relay: {data.TextData.Length} chars");
+                    encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
+                }
+                else if (data.Format == "image/png" && data.BinaryData != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting binary for relay: {data.BinaryData.Length} bytes");
+                    var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
+                    encryptedData = Convert.ToBase64String(encryptedBytes);
+                    isBinary = true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format for relay: {data.Format}");
+                    return;
+                }
+
+                // Create the message
+                var message = new
+                {
+                    type = "ClipboardUpdate",
+                    payload = new
+                    {
+                        format = data.Format,
+                        data = encryptedData,
+                        is_binary = isBinary,
+                        timestamp = data.Timestamp,
+                        key_id = _encryptionService.GetCurrentKeyId(),
+                        sender_id = _deviceManager.LocalDeviceId,
+                        sender_name = _deviceManager.LocalDeviceName
+                    }
+                };
+
+                // Serialize message
+                var json = JsonSerializer.Serialize(message);
+
+                // Send via relay server
+                await _relayConnection.SendEncryptedDataAsync(
+                    device.RelayDeviceId,
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(json)),
+                    "ClipboardUpdate",
+                    cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent via relay to {device.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data via relay: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Check if key rotation is needed and handle it
         /// </summary>
         public async Task CheckAndHandleKeyRotationAsync(CancellationToken cancellationToken = default)
@@ -1177,7 +1852,7 @@ namespace OpenRelay.Services
                 if (_encryptionService.ShouldRotateKey())
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Key rotation needed, creating new rotation key");
-                    
+
                     // Create new rotation key
                     uint newKeyId = _encryptionService.CreateRotationKey();
                     if (newKeyId == 0)
@@ -1185,22 +1860,29 @@ namespace OpenRelay.Services
                         System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to create rotation key");
                         return;
                     }
-                    
+
                     // Get paired devices
                     var devices = _deviceManager.GetPairedDevices();
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending key rotation update to {devices.Count} devices");
-                    
+
                     // Send key rotation update to all devices
                     foreach (var device in devices)
                     {
                         try
                         {
+                            // Check if it's a relay device
+                            if (device.IsRelayPaired)
+                            {
+                                await SendKeyRotationUpdateViaRelayAsync(device, cancellationToken);
+                                continue;
+                            }
+
                             // Try to connect to the device if not connected
                             if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
                             {
                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
                                 webSocket = await ConnectToDeviceAsync(device, cancellationToken);
-                                
+
                                 // Check if connected
                                 if (webSocket == null || webSocket.State != WebSocketState.Open)
                                 {
@@ -1208,7 +1890,7 @@ namespace OpenRelay.Services
                                     continue;
                                 }
                             }
-                            
+
                             // Send key update to this device
                             await SendKeyUpdateToDeviceAsync(device, webSocket, cancellationToken);
                         }
@@ -1224,7 +1906,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error checking key rotation: {ex.Message}");
             }
         }
-        
+
         /// <summary>
         /// Send a key update to a specific device
         /// </summary>
@@ -1234,17 +1916,17 @@ namespace OpenRelay.Services
             {
                 // Get key update package
                 byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(device.CurrentKeyId);
-                
+
                 // Check if we have a valid package
                 if (keyPackage.Length == 0)
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to get key update package for device {device.DeviceName}");
                     return;
                 }
-                
+
                 // Encrypt the key package with the device's shared key
                 byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
-                
+
                 // Create key rotation update message
                 var message = new KeyRotationUpdateMessage
                 {
@@ -1253,11 +1935,11 @@ namespace OpenRelay.Services
                     CurrentKeyId = _encryptionService.GetCurrentKeyId(),
                     KeyPackage = Convert.ToBase64String(encryptedPackage)
                 };
-                
+
                 // Send the message
                 await SendMessageAsync(webSocket, message, cancellationToken);
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName}");
-                
+
                 // Update device's key ID
                 device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
                 _deviceManager.UpdateDevice(device);
@@ -1267,7 +1949,79 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key update to device: {ex.Message}");
             }
         }
-        
+
+        /// <summary>
+        /// Send key rotation update via relay server
+        /// </summary>
+        private async Task SendKeyRotationUpdateViaRelayAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            if (!device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+            {
+                System.Diagnostics.Debug.WriteLine("[NETWORK] Invalid relay device for key rotation");
+                return;
+            }
+
+            // Check relay connection
+            if (!_isConnectedToRelayServer || _relayConnection == null)
+            {
+                // Try to connect to relay server
+                bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                if (!connected)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot send key rotation to {device.DeviceName} - relay server not connected");
+                    return;
+                }
+            }
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending key rotation via relay to {device.DeviceName}");
+
+                // Get key update package
+                byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(device.CurrentKeyId);
+
+                // Check if we have a valid package
+                if (keyPackage.Length == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to get key update package for relay device {device.DeviceName}");
+                    return;
+                }
+
+                // Encrypt the key package with the device's shared key
+                byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
+
+                // Create key rotation update message
+                var message = new
+                {
+                    type = "KeyRotationUpdate",
+                    current_key_id = _encryptionService.GetCurrentKeyId(),
+                    key_package = Convert.ToBase64String(encryptedPackage),
+                    sender_id = _deviceManager.LocalDeviceId,
+                    sender_name = _deviceManager.LocalDeviceName
+                };
+
+                // Serialize message
+                var json = JsonSerializer.Serialize(message);
+
+                // Send via relay server
+                await _relayConnection.SendEncryptedDataAsync(
+                    device.RelayDeviceId,
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(json)),
+                    "KeyRotationUpdate",
+                    cancellationToken);
+
+                // Update device's key ID
+                device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
+                _deviceManager.UpdateDevice(device);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent via relay to {device.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key rotation update via relay: {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Request a key update from a device
         /// </summary>
@@ -1275,13 +2029,20 @@ namespace OpenRelay.Services
         {
             try
             {
+                // Check if relay device
+                if (device.IsRelayPaired)
+                {
+                    await RequestKeyUpdateViaRelayAsync(device, cancellationToken);
+                    return;
+                }
+
                 // Check if the device is connected
                 if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, can't request key update");
                     return;
                 }
-                
+
                 // Create key rotation request message
                 var message = new KeyRotationRequestMessage
                 {
@@ -1289,7 +2050,7 @@ namespace OpenRelay.Services
                     DeviceName = _deviceManager.LocalDeviceName,
                     LastKnownKeyId = device.CurrentKeyId
                 };
-                
+
                 // Send the message
                 await SendMessageAsync(webSocket, message, cancellationToken);
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation request sent to {device.DeviceName}");
@@ -1299,7 +2060,61 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error requesting key update: {ex.Message}");
             }
         }
-        
+
+        /// <summary>
+        /// Request key update via relay server
+        /// </summary>
+        private async Task RequestKeyUpdateViaRelayAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            if (!device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+            {
+                System.Diagnostics.Debug.WriteLine("[NETWORK] Invalid relay device for key rotation request");
+                return;
+            }
+
+            // Check relay connection
+            if (!_isConnectedToRelayServer || _relayConnection == null)
+            {
+                // Try to connect to relay server
+                bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                if (!connected)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot request key rotation from {device.DeviceName} - relay server not connected");
+                    return;
+                }
+            }
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Requesting key rotation via relay from {device.DeviceName}");
+
+                // Create key rotation request message
+                var message = new
+                {
+                    type = "KeyRotationRequest",
+                    last_known_key_id = device.CurrentKeyId,
+                    sender_id = _deviceManager.LocalDeviceId,
+                    sender_name = _deviceManager.LocalDeviceName
+                };
+
+                // Serialize message
+                var json = JsonSerializer.Serialize(message);
+
+                // Send via relay server
+                await _relayConnection.SendEncryptedDataAsync(
+                    device.RelayDeviceId,
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(json)),
+                    "KeyRotationRequest",
+                    cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation request sent via relay to {device.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key rotation request via relay: {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Handle a key rotation update message
         /// </summary>
@@ -1308,32 +2123,32 @@ namespace OpenRelay.Services
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Received key rotation update from {device.DeviceName}");
-                
+
                 // Extract key information
                 var currentKeyId = root.GetProperty("current_key_id").GetUInt32();
                 var keyPackage = root.GetProperty("key_package").GetString() ?? string.Empty;
-                
+
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update: current key ID = {currentKeyId}");
-                
+
                 // Decrypt the key package
                 byte[] encryptedPackage = Convert.FromBase64String(keyPackage);
                 byte[] packageData = _encryptionService.DecryptData(encryptedPackage, Convert.FromBase64String(device.SharedKey));
-                
+
                 // Import the key package
                 uint importedKeyId = _encryptionService.ImportKeyUpdatePackage(packageData);
-                
+
                 if (importedKeyId == 0)
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Failed to import key package");
                     return;
                 }
-                
+
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully imported key package, current key ID = {importedKeyId}");
-                
+
                 // Update device's key ID
                 device.CurrentKeyId = currentKeyId;
                 _deviceManager.UpdateDevice(device);
-                
+
                 // Update device last seen
                 _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
             }
@@ -1342,7 +2157,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling key rotation update: {ex.Message}");
             }
         }
-        
+
         /// <summary>
         /// Handle a key rotation request message
         /// </summary>
@@ -1351,20 +2166,20 @@ namespace OpenRelay.Services
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Received key rotation request from {device.DeviceName}");
-                
+
                 // Extract last known key ID
                 var lastKnownKeyId = root.GetProperty("last_known_key_id").GetUInt32();
-                
+
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation request: last known key ID = {lastKnownKeyId}");
-                
+
                 // Get key update package
                 byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(lastKnownKeyId);
-                
+
                 // Check if we have a valid package
                 if (keyPackage.Length == 0)
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] No valid key update package available, re-auth required");
-                    
+
                     // Send auth failed message to trigger re-authentication
                     var authFailedMessage = new AuthFailedMessage
                     {
@@ -1372,14 +2187,14 @@ namespace OpenRelay.Services
                         DeviceName = _deviceManager.LocalDeviceName,
                         Reason = "Key rotation required, please re-authenticate"
                     };
-                    
+
                     await SendMessageAsync(webSocket, authFailedMessage, cancellationToken);
                     return;
                 }
-                
+
                 // Encrypt the key package with the device's shared key
                 byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
-                
+
                 // Create key rotation update message
                 var message = new KeyRotationUpdateMessage
                 {
@@ -1388,13 +2203,13 @@ namespace OpenRelay.Services
                     CurrentKeyId = _encryptionService.GetCurrentKeyId(),
                     KeyPackage = Convert.ToBase64String(encryptedPackage)
                 };
-                
+
                 // Send the message
                 await SendMessageAsync(webSocket, message, cancellationToken);
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName}");
-                
+
                 _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
-                
+
                 // Update device's key ID
                 device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
                 _deviceManager.UpdateDevice(device);

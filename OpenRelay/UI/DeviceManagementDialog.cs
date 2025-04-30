@@ -25,7 +25,7 @@ namespace OpenRelay.UI
         {
             // Form settings
             this.Text = "Manage Paired Devices";
-            this.Size = new Size(550, 400);
+            this.Size = new Size(600, 400);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.MinimizeBox = false;
             this.MaximizeBox = false;
@@ -43,7 +43,8 @@ namespace OpenRelay.UI
             };
 
             deviceListView.Columns.Add("Device Name", 150);
-            deviceListView.Columns.Add("IP Address", 120);
+            deviceListView.Columns.Add("Connection Type", 100);
+            deviceListView.Columns.Add("Address/ID", 150);
             deviceListView.Columns.Add("Platform", 100);
             deviceListView.Columns.Add("Last Seen", 120);
 
@@ -105,11 +106,31 @@ namespace OpenRelay.UI
             foreach (var device in devices)
             {
                 var item = new ListViewItem(device.DeviceName);
-                item.SubItems.Add(device.IpAddress);
+
+                // Add connection type
+                item.SubItems.Add(device.IsRelayPaired ? "Relay" : "Local");
+
+                // Add address/ID
+                if (device.IsRelayPaired)
+                {
+                    item.SubItems.Add(device.RelayDeviceId);
+                }
+                else
+                {
+                    item.SubItems.Add(device.IpAddress);
+                }
+
                 item.SubItems.Add(device.Platform);
                 item.SubItems.Add(device.LastSeen.ToString("MM/dd/yyyy h:mm:ss tt"));
+
                 item.Tag = device.DeviceId;
                 deviceListView.Items.Add(item);
+            }
+
+            // Auto-size columns
+            foreach (ColumnHeader column in deviceListView.Columns)
+            {
+                column.Width = -2; // Auto-size to header and content
             }
         }
 

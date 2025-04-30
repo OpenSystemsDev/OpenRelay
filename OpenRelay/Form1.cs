@@ -12,12 +12,14 @@ namespace OpenRelay
         private NotifyIcon trayIcon;
         private ContextMenuStrip trayMenu;
         private ToolStripMenuItem statusItem;
+        private ToolStripMenuItem relayStatusItem;
 
         // Services
         private readonly EncryptionService _encryptionService;
         private readonly DeviceManager _deviceManager;
         private readonly ClipboardService _clipboardService;
         private readonly NetworkService _networkService;
+        private readonly SettingsManager _settingsManager;
 
         // Cancellation token source for network operations
         private System.Threading.CancellationTokenSource? _cts;
@@ -30,7 +32,6 @@ namespace OpenRelay
             InitializeComponent();
 
             // Enable better DPI scaling
-            // TODO this doesnt work well on 1440p sadly
             this.AutoScaleMode = AutoScaleMode.Dpi;
 
             // Set up the system tray icon
@@ -47,8 +48,9 @@ namespace OpenRelay
             {
                 _encryptionService = new EncryptionService();
                 _deviceManager = new DeviceManager(_encryptionService);
+                _settingsManager = new SettingsManager(_encryptionService);
                 _clipboardService = new ClipboardService();
-                _networkService = new NetworkService(_deviceManager, _encryptionService);
+                _networkService = new NetworkService(_deviceManager, _encryptionService, _settingsManager);
 
                 // Set up event handlers
                 _deviceManager.PairingRequestReceived += DeviceManager_PairingRequestReceived;
@@ -58,6 +60,7 @@ namespace OpenRelay
                 _clipboardService.ClipboardChanged += ClipboardService_ClipboardChanged;
 
                 _networkService.ClipboardDataReceived += NetworkService_ClipboardDataReceived;
+                _networkService.RelayServerConnectionChanged += NetworkService_RelayServerConnectionChanged;
 
                 // Start services
                 _clipboardService.Start();
@@ -75,6 +78,7 @@ namespace OpenRelay
 
                 // Update status
                 UpdateStatus("Connected");
+                UpdateRelayStatus(false);
             }
             catch (Exception ex)
             {
@@ -90,11 +94,17 @@ namespace OpenRelay
             statusItem = new ToolStripMenuItem("Status: Starting...");
             statusItem.Enabled = false;
             trayMenu.Items.Add(statusItem);
-            trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
-            trayMenu.Items.Add("Add Device", null, AddDeviceItem_Click);
-            trayMenu.Items.Add("Debug", null, DebugItem_Click);
+
+            relayStatusItem = new ToolStripMenuItem("Relay: Disconnected");
+            relayStatusItem.Enabled = false;
+            trayMenu.Items.Add(relayStatusItem);
+
             trayMenu.Items.Add("-");
-            trayMenu.Items.Add("Rotate Keys", null, RotateKeysItem_Click);
+            trayMenu.Items.Add("Devices...", null, DevicesItem_Click);
+            trayMenu.Items.Add("Add Device (Local)", null, AddDeviceLocalItem_Click);
+            trayMenu.Items.Add("Add Device (Relay)", null, AddDeviceRelayItem_Click);
+            trayMenu.Items.Add("-");
+            trayMenu.Items.Add("Settings", null, SettingsItem_Click);
             trayMenu.Items.Add("-");
             trayMenu.Items.Add("Exit", null, ExitItem_Click);
 
@@ -113,6 +123,13 @@ namespace OpenRelay
             {
                 await _networkService.StartAsync();
                 UpdateStatus("Connected");
+
+                // Check if relay is enabled
+                var settings = _settingsManager.GetSettings();
+                if (settings.UseRelayServer)
+                {
+                    await _networkService.ConnectToRelayServerAsync(_cts?.Token ?? default);
+                }
             }
             catch (Exception ex)
             {
@@ -144,34 +161,6 @@ namespace OpenRelay
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[KEY] Error checking key rotation: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Handle manual key rotation from menu
-        /// </summary>
-        private async void RotateKeysItem_Click(object? sender, EventArgs e)
-        {
-            try
-            {
-                // Create a new rotation key
-                uint newKeyId = _encryptionService.CreateRotationKey();
-                if (newKeyId == 0)
-                {
-                    MessageBox.Show("Failed to rotate keys", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
-
-                // Send key rotation update to all devices
-                await _networkService.CheckAndHandleKeyRotationAsync();
-
-                MessageBox.Show($"Keys rotated successfully. New key ID: {newKeyId}", "Success",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error rotating keys: {ex.Message}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -287,6 +276,17 @@ namespace OpenRelay
             );
         }
 
+        private void NetworkService_RelayServerConnectionChanged(object sender, bool connected)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action<object, bool>(NetworkService_RelayServerConnectionChanged), sender, connected);
+                return;
+            }
+
+            UpdateRelayStatus(connected);
+        }
+
         private void UpdateStatus(string status)
         {
             if (InvokeRequired)
@@ -296,6 +296,17 @@ namespace OpenRelay
             }
 
             statusItem.Text = $"Status: {status}";
+        }
+
+        private void UpdateRelayStatus(bool connected)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action<bool>(UpdateRelayStatus), connected);
+                return;
+            }
+
+            relayStatusItem.Text = $"Relay: {(connected ? "Connected" : "Disconnected")}";
         }
 
         private void TrayIcon_DoubleClick(object? sender, EventArgs e)
@@ -309,10 +320,10 @@ namespace OpenRelay
             ShowDevices();
         }
 
-        private void AddDeviceItem_Click(object? sender, EventArgs e)
+        private void AddDeviceLocalItem_Click(object? sender, EventArgs e)
         {
             // Show IP input dialog
-            using (var dialog = new TextInputDialog("Add Device", "Enter the IP address of the device to pair with:"))
+            using (var dialog = new TextInputDialog("Add Device (Local)", "Enter the IP address of the device to pair with:"))
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
@@ -321,7 +332,7 @@ namespace OpenRelay
                     // Send pairing request
                     Task.Run(async () =>
                     {
-                        bool success = await _networkService.SendPairingRequestAsync(ipAddress);
+                        bool success = await _networkService.SendPairingRequestAsync(ipAddress, false);
 
                         if (InvokeRequired)
                         {
@@ -332,6 +343,73 @@ namespace OpenRelay
                             ShowPairingResult(success);
                         }
                     });
+                }
+            }
+        }
+
+        private void AddDeviceRelayItem_Click(object? sender, EventArgs e)
+        {
+            // Check if connected to relay
+            if (!_networkService.IsConnectedToRelayServer)
+            {
+                MessageBox.Show(
+                    "Not connected to relay server. Please enable relay server in Settings first.",
+                    "Relay Not Connected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Show relay ID input dialog
+            using (var dialog = new TextInputDialog("Add Device (Relay)", "Enter the Relay ID of the device to pair with:"))
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    string relayId = dialog.InputText;
+
+                    // Send pairing request
+                    Task.Run(async () =>
+                    {
+                        bool success = await _networkService.SendPairingRequestAsync(relayId, true);
+
+                        if (InvokeRequired)
+                        {
+                            Invoke(new Action<bool>(ShowPairingResult), success);
+                        }
+                        else
+                        {
+                            ShowPairingResult(success);
+                        }
+                    });
+                }
+            }
+        }
+
+        private void SettingsItem_Click(object? sender, EventArgs e)
+        {
+            // Show settings dialog
+            using (var dialog = new SettingsDialog(_settingsManager))
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    // Get updated settings
+                    var settings = _settingsManager.GetSettings();
+
+                    // Handle relay server connection if setting changed
+                    if (settings.UseRelayServer)
+                    {
+                        if (!_networkService.IsConnectedToRelayServer)
+                        {
+                            Task.Run(async () => await _networkService.ConnectToRelayServerAsync());
+                        }
+                    }
+                    else
+                    {
+                        if (_networkService.IsConnectedToRelayServer)
+                        {
+                            Task.Run(async () => await _networkService.DisconnectFromRelayServerAsync());
+                        }
+                    }
                 }
             }
         }
@@ -354,33 +432,6 @@ namespace OpenRelay
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
-        }
-
-        private void DebugItem_Click(object? sender, EventArgs e)
-        {
-            // Show debug info
-            var devices = _deviceManager.GetPairedDevices();
-            if (devices.Count == 0)
-            {
-                MessageBox.Show("No paired devices found. Add a device to get started.", "Devices",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            var devicesText = "Paired Devices:\n\n";
-            foreach (var device in devices)
-            {
-                devicesText += $"{device.DeviceName} ({device.Platform})\n";
-                devicesText += $"IP: {device.IpAddress}:{device.Port}\n";
-                devicesText += $"Key ID: {device.CurrentKeyId}\n";
-                devicesText += $"Last seen: {device.LastSeen}\n\n";
-            }
-
-            // Add encryption info
-            devicesText += $"Current Key ID: {_encryptionService.GetCurrentKeyId()}\n";
-            devicesText += $"Key Rotation Needed: {(_encryptionService.ShouldRotateKey() ? "Yes" : "No")}\n";
-
-            MessageBox.Show(devicesText, "Debug Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ShowDevices()

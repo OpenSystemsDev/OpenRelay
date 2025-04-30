@@ -52,9 +52,19 @@ namespace OpenRelay.Models
         /// </summary>
         public byte[]? EncryptedStorageData { get; set; }
 
+        /// <summary>
+        /// Whether this device is paired via the relay server
+        /// </summary>
+        public bool IsRelayPaired { get; set; } = false;
+
+        /// <summary>
+        /// Device ID on the relay server (may be different from local DeviceId)
+        /// </summary>
+        public string RelayDeviceId { get; set; } = string.Empty;
+
         public override string ToString()
         {
-            return $"{DeviceName} ({IpAddress})";
+            return $"{DeviceName} ({(IsRelayPaired ? "Relay" : IpAddress)})";
         }
     }
 }
