@@ -11,6 +11,9 @@ namespace OpenRelay.Models
         PairingRequest,
         PairingResponse,
         Auth,
+        AuthChallenge,
+        AuthResponse,
+        AuthVerify,
         AuthSuccess,
         AuthFailed,
         ClipboardUpdate,
@@ -44,6 +47,12 @@ namespace OpenRelay.Models
         public string DeviceName { get; set; } = string.Empty;
 
         /// <summary>
+        /// Hardware ID hash of the device
+        /// </summary>
+        [JsonPropertyName("hardware_id")]
+        public string HardwareId { get; set; } = string.Empty;
+
+        /// <summary>
         /// Timestamp of the message
         /// </summary>
         [JsonPropertyName("timestamp")]
@@ -70,10 +79,16 @@ namespace OpenRelay.Models
         public string RequestId { get; set; } = Guid.NewGuid().ToString();
 
         /// <summary>
-        /// Public key for ECDH key exchange if used, im gonna implement this later. Code works as of now
+        /// Public key for challenge-response authentication
         /// </summary>
         [JsonPropertyName("public_key")]
         public string? PublicKey { get; set; }
+
+        /// <summary>
+        /// Initial challenge for authentication
+        /// </summary>
+        [JsonPropertyName("challenge")]
+        public string Challenge { get; set; } = string.Empty;
 
         /// <summary>
         /// Platform of the requesting device
@@ -115,6 +130,18 @@ namespace OpenRelay.Models
         public string? PublicKey { get; set; }
 
         /// <summary>
+        /// Challenge response - signed challenge from the request
+        /// </summary>
+        [JsonPropertyName("challenge_response")]
+        public string ChallengeResponse { get; set; } = string.Empty;
+
+        /// <summary>
+        /// New challenge for requester to verify
+        /// </summary>
+        [JsonPropertyName("challenge")]
+        public string Challenge { get; set; } = string.Empty;
+
+        /// <summary>
         /// Encrypted shared key for the device if accepted
         /// </summary>
         [JsonPropertyName("encrypted_shared_key")]
@@ -142,6 +169,78 @@ namespace OpenRelay.Models
     }
 
     /// <summary>
+    /// Message for initiating a challenge-response authentication
+    /// </summary>
+    public class AuthChallengeMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new auth challenge message
+        /// </summary>
+        public AuthChallengeMessage()
+        {
+            Type = MessageType.AuthChallenge.ToString();
+        }
+
+        /// <summary>
+        /// Public key for verification
+        /// </summary>
+        [JsonPropertyName("public_key")]
+        public string PublicKey { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Challenge data for the recipient to sign
+        /// </summary>
+        [JsonPropertyName("challenge")]
+        public string Challenge { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Message for responding to an authentication challenge
+    /// </summary>
+    public class AuthResponseMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new auth response message
+        /// </summary>
+        public AuthResponseMessage()
+        {
+            Type = MessageType.AuthResponse.ToString();
+        }
+
+        /// <summary>
+        /// Signed response to the challenge
+        /// </summary>
+        [JsonPropertyName("challenge_response")]
+        public string ChallengeResponse { get; set; } = string.Empty;
+
+        /// <summary>
+        /// New challenge for the challenger to prove their identity
+        /// </summary>
+        [JsonPropertyName("challenge")]
+        public string Challenge { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Message for verifying an authentication response
+    /// </summary>
+    public class AuthVerifyMessage : NetworkMessage
+    {
+        /// <summary>
+        /// Create a new auth verification message
+        /// </summary>
+        public AuthVerifyMessage()
+        {
+            Type = MessageType.AuthVerify.ToString();
+        }
+
+        /// <summary>
+        /// Signed response to the challenge from AuthResponse
+        /// </summary>
+        [JsonPropertyName("challenge_response")]
+        public string ChallengeResponse { get; set; } = string.Empty;
+    }
+
+    /// <summary>
     /// Message for successful authentication
     /// </summary>
     public class AuthSuccessMessage : NetworkMessage
@@ -159,6 +258,12 @@ namespace OpenRelay.Models
         /// </summary>
         [JsonPropertyName("key_id")]
         public uint KeyId { get; set; }
+
+        /// <summary>
+        /// Whether the device is trusted
+        /// </summary>
+        [JsonPropertyName("trusted")]
+        public bool Trusted { get; set; } = true;
     }
 
     /// <summary>

@@ -361,7 +361,7 @@ namespace OpenRelay
             }
 
             // Show relay ID input dialog
-            using (var dialog = new TextInputDialog("Add Device (Relay)", "Enter the Relay ID of the device to pair with:"))
+            using (var dialog = new TextInputDialog("Add Device (Relay)", "Enter the Hardware ID of the device to pair with:"))
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {

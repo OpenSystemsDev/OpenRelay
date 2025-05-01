@@ -62,6 +62,21 @@ namespace OpenRelay.Models
         /// </summary>
         public string RelayDeviceId { get; set; } = string.Empty;
 
+        /// <summary>
+        /// Hardware ID hash for the device
+        /// </summary>
+        public string HardwareId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Public key for the device (used for challenge-response authentication)
+        /// </summary>
+        public string PublicKey { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Whether the device has been authenticated via challenge-response
+        /// </summary>
+        public bool IsAuthenticated { get; set; } = false;
+
         public override string ToString()
         {
             return $"{DeviceName} ({(IsRelayPaired ? "Relay" : IpAddress)})";

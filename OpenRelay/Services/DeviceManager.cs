@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using OpenRelay.Models;
 
 namespace OpenRelay.Services
@@ -15,14 +17,20 @@ namespace OpenRelay.Services
         public int Port { get; }
         public bool Accepted { get; set; }
         public string Platform { get; }
+        public string HardwareId { get; }
+        public string Challenge { get; }
+        public string PublicKey { get; }
 
-        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows")
+        public PairingRequestEventArgs(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows", string hardwareId = "", string challenge = "", string publicKey = "")
         {
             DeviceId = deviceId;
             DeviceName = deviceName;
             IpAddress = ipAddress;
             Port = port;
             Platform = platform;
+            HardwareId = hardwareId;
+            Challenge = challenge;
+            PublicKey = publicKey;
             Accepted = false;
         }
     }
@@ -48,19 +56,33 @@ namespace OpenRelay.Services
         public event EventHandler<DeviceEventArgs>? DeviceUpdated;
         public event EventHandler<string>? DeviceRemoved;
 
+        // Cryptographic challenge events
+        public event EventHandler<ChallengeEventArgs>? ChallengeReceived;
+        public event EventHandler<ChallengeResponseEventArgs>? ChallengeResponseReceived;
+        public event EventHandler<AuthVerifyEventArgs>? AuthVerifyReceived;
+        public event EventHandler<AuthSuccessEventArgs>? AuthSuccessReceived;
+
         // Collection of paired devices
         private readonly List<PairedDevice> _pairedDevices = new List<PairedDevice>();
+
+        // Store active authentication sessions
+        private readonly Dictionary<string, AuthenticationSession> _authSessions = new Dictionary<string, AuthenticationSession>();
 
         // Local device information
         public string LocalDeviceId { get; }
         public string LocalDeviceName { get; }
         public string LocalPlatform { get; } = "Windows";
+        public string LocalHardwareId { get; }
 
         // File path for storing paired devices
         private readonly string _storageFilePath;
         private readonly string _secureStorageFilePath;
 
         private readonly EncryptionService _encryptionService;
+
+        // Key pair for challenge-response authentication
+        private readonly RSA _rsaKeyPair;
+        private readonly string _publicKeyBase64;
 
         /// <summary>
         /// Initialize the device manager
@@ -106,7 +128,329 @@ namespace OpenRelay.Services
                 File.WriteAllLines(deviceIdFilePath, new[] { LocalDeviceId, LocalDeviceName });
             }
 
+            // Get hardware ID
+            LocalHardwareId = HardwareIdProvider.GetHardwareId();
+
+            // Generate or load RSA key pair for challenge-response authentication
+            var keyPairFilePath = Path.Combine(appFolder, "auth_keypair.bin");
+            if (File.Exists(keyPairFilePath))
+            {
+                try
+                {
+                    byte[] encryptedKeyPair = File.ReadAllBytes(keyPairFilePath);
+                    byte[] keyPairBytes = ProtectedData.Unprotect(encryptedKeyPair, null, DataProtectionScope.CurrentUser);
+                    _rsaKeyPair = RSA.Create();
+                    _rsaKeyPair.ImportRSAPrivateKey(keyPairBytes, out _);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[DEVICE] Error loading key pair: {ex.Message}, generating new one");
+                    _rsaKeyPair = RSA.Create(2048);
+                    SaveKeyPair(_rsaKeyPair, keyPairFilePath);
+                }
+            }
+            else
+            {
+                _rsaKeyPair = RSA.Create(2048);
+                SaveKeyPair(_rsaKeyPair, keyPairFilePath);
+            }
+
+            // Export public key 
+            _publicKeyBase64 = Convert.ToBase64String(_rsaKeyPair.ExportRSAPublicKey());
+
             LoadPairedDevices();
+        }
+
+        /// <summary>
+        /// Save the RSA key pair to file
+        /// </summary>
+        private void SaveKeyPair(RSA keyPair, string filePath)
+        {
+            try
+            {
+                byte[] keyPairBytes = keyPair.ExportRSAPrivateKey();
+                byte[] encryptedKeyPair = ProtectedData.Protect(keyPairBytes, null, DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(filePath, encryptedKeyPair);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] Error saving key pair: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Get the public key for challenge-response authentication
+        /// </summary>
+        public string GetPublicKey()
+        {
+            return _publicKeyBase64;
+        }
+
+        /// <summary>
+        /// Generate a random challenge for authentication
+        /// </summary>
+        public string GenerateChallenge()
+        {
+            var challenge = new byte[32]; // 256 bits
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(challenge);
+            }
+            return Convert.ToBase64String(challenge);
+        }
+
+        /// <summary>
+        /// Sign a challenge with our private key
+        /// </summary>
+        public string SignChallenge(string challenge)
+        {
+            try
+            {
+                byte[] challengeBytes = Convert.FromBase64String(challenge);
+                byte[] signature = _rsaKeyPair.SignData(challengeBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                return Convert.ToBase64String(signature);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] Error signing challenge: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Verify a challenge response with a device's public key
+        /// </summary>
+        public bool VerifyChallengeResponse(string challenge, string response, string publicKey)
+        {
+            try
+            {
+                byte[] challengeBytes = Convert.FromBase64String(challenge);
+                byte[] responseBytes = Convert.FromBase64String(response);
+                byte[] publicKeyBytes = Convert.FromBase64String(publicKey);
+
+                using var rsa = RSA.Create();
+                rsa.ImportRSAPublicKey(publicKeyBytes, out _);
+
+                return rsa.VerifyData(challengeBytes, responseBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] Error verifying challenge response: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Handle a challenge request from another device
+        /// </summary>
+        public string HandleChallengeRequest(string deviceId, string challenge, string publicKey, string hardwareId)
+        {
+            // Store the challenge session
+            var session = new AuthenticationSession
+            {
+                DeviceId = deviceId,
+                TheirChallenge = challenge,
+                TheirPublicKey = publicKey,
+                HardwareId = hardwareId,
+                OurChallenge = GenerateChallenge(),
+                State = AuthenticationState.ReceivedChallenge
+            };
+
+            _authSessions[deviceId] = session;
+
+            // Notify listeners
+            ChallengeReceived?.Invoke(this, new ChallengeEventArgs
+            {
+                DeviceId = deviceId,
+                Challenge = challenge,
+                PublicKey = publicKey,
+                HardwareId = hardwareId
+            });
+
+            // Sign their challenge
+            string response = SignChallenge(challenge);
+
+            return response;
+        }
+
+        /// <summary>
+        /// Handle a challenge response from another device
+        /// </summary>
+        public bool HandleChallengeResponse(string deviceId, string challengeResponse, string theirChallenge, string hardwareId)
+        {
+            if (!_authSessions.TryGetValue(deviceId, out var session))
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] No authentication session for device {deviceId}");
+                return false;
+            }
+
+            // Verify their response to our challenge
+            if (session.State == AuthenticationState.SentChallenge)
+            {
+                bool isValid = VerifyChallengeResponse(session.OurChallenge, challengeResponse, session.TheirPublicKey);
+
+                if (isValid)
+                {
+                    session.State = AuthenticationState.VerifiedTheirResponse;
+                    session.TheirChallenge = theirChallenge;
+
+                    // Notify listeners
+                    ChallengeResponseReceived?.Invoke(this, new ChallengeResponseEventArgs
+                    {
+                        DeviceId = deviceId,
+                        ChallengeResponse = challengeResponse,
+                        NewChallenge = theirChallenge,
+                        HardwareId = hardwareId,
+                        IsValid = true
+                    });
+
+                    return true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[DEVICE] Invalid challenge response from {deviceId}");
+                    _authSessions.Remove(deviceId);
+
+                    // Notify listeners
+                    ChallengeResponseReceived?.Invoke(this, new ChallengeResponseEventArgs
+                    {
+                        DeviceId = deviceId,
+                        ChallengeResponse = challengeResponse,
+                        NewChallenge = theirChallenge,
+                        HardwareId = hardwareId,
+                        IsValid = false
+                    });
+
+                    return false;
+                }
+            }
+            else if (session.State == AuthenticationState.ReceivedChallenge)
+            {
+                // We received their challenge first, now we're getting their response to our challenge
+                bool isValid = VerifyChallengeResponse(session.TheirChallenge, challengeResponse, session.TheirPublicKey);
+
+                if (isValid)
+                {
+                    session.State = AuthenticationState.VerifiedTheirResponse;
+
+                    // Notify listeners
+                    ChallengeResponseReceived?.Invoke(this, new ChallengeResponseEventArgs
+                    {
+                        DeviceId = deviceId,
+                        ChallengeResponse = challengeResponse,
+                        NewChallenge = theirChallenge,
+                        HardwareId = hardwareId,
+                        IsValid = true
+                    });
+
+                    return true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[DEVICE] Invalid challenge response from {deviceId}");
+                    _authSessions.Remove(deviceId);
+
+                    // Notify listeners
+                    ChallengeResponseReceived?.Invoke(this, new ChallengeResponseEventArgs
+                    {
+                        DeviceId = deviceId,
+                        ChallengeResponse = challengeResponse,
+                        NewChallenge = theirChallenge,
+                        HardwareId = hardwareId,
+                        IsValid = false
+                    });
+
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Handle authentication verification from another device
+        /// </summary>
+        public bool HandleAuthVerify(string deviceId, string challengeResponse, string hardwareId)
+        {
+            if (!_authSessions.TryGetValue(deviceId, out var session))
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] No authentication session for device {deviceId}");
+                return false;
+            }
+
+            // Verify their response to our challenge
+            bool isValid = VerifyChallengeResponse(session.OurChallenge, challengeResponse, session.TheirPublicKey);
+
+            if (isValid)
+            {
+                session.State = AuthenticationState.FullyVerified;
+
+                // Notify listeners
+                AuthVerifyReceived?.Invoke(this, new AuthVerifyEventArgs
+                {
+                    DeviceId = deviceId,
+                    ChallengeResponse = challengeResponse,
+                    HardwareId = hardwareId,
+                    IsValid = true
+                });
+
+                // Mark the device as authenticated if it exists
+                var device = GetDeviceById(deviceId);
+                if (device != null)
+                {
+                    device.IsAuthenticated = true;
+                    device.HardwareId = hardwareId;
+                    device.PublicKey = session.TheirPublicKey;
+                    UpdateDevice(device);
+                }
+
+                return true;
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"[DEVICE] Invalid authentication verification from {deviceId}");
+                _authSessions.Remove(deviceId);
+
+                // Notify listeners
+                AuthVerifyReceived?.Invoke(this, new AuthVerifyEventArgs
+                {
+                    DeviceId = deviceId,
+                    ChallengeResponse = challengeResponse,
+                    HardwareId = hardwareId,
+                    IsValid = false
+                });
+
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Handle authentication success from another device
+        /// </summary>
+        public void HandleAuthSuccess(string deviceId, bool trusted, string hardwareId)
+        {
+            // Notify listeners
+            AuthSuccessReceived?.Invoke(this, new AuthSuccessEventArgs
+            {
+                DeviceId = deviceId,
+                Trusted = trusted,
+                HardwareId = hardwareId
+            });
+
+            // Clean up the session
+            _authSessions.Remove(deviceId);
+
+            // Mark the device as authenticated if it exists and we trust it
+            if (trusted)
+            {
+                var device = GetDeviceById(deviceId);
+                if (device != null)
+                {
+                    device.IsAuthenticated = true;
+                    device.HardwareId = hardwareId;
+                    UpdateDevice(device);
+                }
+            }
         }
 
         /// <summary>
@@ -298,6 +642,14 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
+        /// Get a device by hardware ID
+        /// </summary>
+        public PairedDevice? GetDeviceByHardwareId(string hardwareId)
+        {
+            return _pairedDevices.FirstOrDefault(d => d.HardwareId == hardwareId);
+        }
+
+        /// <summary>
         /// Get a device by IP address
         /// </summary>
         public PairedDevice? GetDeviceByIp(string ipAddress)
@@ -311,6 +663,14 @@ namespace OpenRelay.Services
         public bool IsPairedDevice(string deviceId)
         {
             return _pairedDevices.Any(d => d.DeviceId == deviceId);
+        }
+
+        /// <summary>
+        /// Check if a hardware ID is paired
+        /// </summary>
+        public bool IsPairedHardwareId(string hardwareId)
+        {
+            return _pairedDevices.Any(d => d.HardwareId == hardwareId);
         }
 
         /// <summary>
@@ -330,6 +690,9 @@ namespace OpenRelay.Services
                 existingDevice.SharedKey = device.SharedKey;
                 existingDevice.CurrentKeyId = device.CurrentKeyId;
                 existingDevice.LastSeen = DateTime.Now;
+                existingDevice.HardwareId = device.HardwareId;
+                existingDevice.PublicKey = device.PublicKey;
+                existingDevice.IsAuthenticated = device.IsAuthenticated;
 
                 // Notify listeners
                 DeviceUpdated?.Invoke(this, new DeviceEventArgs(existingDevice));
@@ -419,17 +782,32 @@ namespace OpenRelay.Services
         /// <summary>
         /// Handle a pairing request
         /// </summary>
-        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows")
+        public bool HandlePairingRequest(string deviceId, string deviceName, string ipAddress, int port, string platform = "Windows", string hardwareId = "", string challenge = "", string publicKey = "")
         {
-            // Check if already paired
+            // Check if already paired by device ID
             if (IsPairedDevice(deviceId))
             {
                 UpdateDeviceLastSeen(deviceId);
                 return true; // Already paired
             }
 
+            // Check if already paired by hardware ID (prevents re-pairing after reinstall)
+            if (!string.IsNullOrEmpty(hardwareId) && IsPairedHardwareId(hardwareId))
+            {
+                var existingDevice = _pairedDevices.FirstOrDefault(d => d.HardwareId == hardwareId);
+                if (existingDevice != null)
+                {
+                    // Update the existing device with the new device ID
+                    existingDevice.DeviceId = deviceId;
+                    existingDevice.DeviceName = deviceName;
+                    existingDevice.LastSeen = DateTime.Now;
+                    UpdateDevice(existingDevice);
+                    return true; // Already paired by hardware ID
+                }
+            }
+
             // Create event args
-            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, platform);
+            var args = new PairingRequestEventArgs(deviceId, deviceName, ipAddress, port, platform, hardwareId, challenge, publicKey);
 
             // Notify listeners
             PairingRequestReceived?.Invoke(this, args);
@@ -446,10 +824,29 @@ namespace OpenRelay.Services
                     Platform = platform,
                     SharedKey = _encryptionService.GenerateKey(),
                     CurrentKeyId = _encryptionService.GetCurrentKeyId(), // Set current key ID
-                    LastSeen = DateTime.Now
+                    LastSeen = DateTime.Now,
+                    HardwareId = hardwareId,
+                    PublicKey = publicKey,
+                    IsAuthenticated = false // Will be set to true after challenge-response
                 };
 
                 AddOrUpdateDevice(device);
+
+                // Start challenge-response authentication if we have the necessary info
+                if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
+                {
+                    var session = new AuthenticationSession
+                    {
+                        DeviceId = deviceId,
+                        TheirChallenge = challenge,
+                        TheirPublicKey = publicKey,
+                        HardwareId = hardwareId,
+                        OurChallenge = GenerateChallenge(),
+                        State = AuthenticationState.ReceivedChallenge
+                    };
+
+                    _authSessions[deviceId] = session;
+                }
             }
 
             return args.Accepted;
@@ -460,7 +857,77 @@ namespace OpenRelay.Services
         /// </summary>
         public void Dispose()
         {
-            // No special cleanup needed
+            // Clean up resources
+            _rsaKeyPair.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Authentication session state
+    /// </summary>
+    public enum AuthenticationState
+    {
+        New,
+        SentChallenge,
+        ReceivedChallenge,
+        VerifiedTheirResponse,
+        FullyVerified
+    }
+
+    /// <summary>
+    /// Authentication session
+    /// </summary>
+    public class AuthenticationSession
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public string TheirPublicKey { get; set; } = string.Empty;
+        public string TheirChallenge { get; set; } = string.Empty;
+        public string OurChallenge { get; set; } = string.Empty;
+        public string HardwareId { get; set; } = string.Empty;
+        public AuthenticationState State { get; set; } = AuthenticationState.New;
+    }
+
+    /// <summary>
+    /// Challenge event arguments
+    /// </summary>
+    public class ChallengeEventArgs : EventArgs
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public string Challenge { get; set; } = string.Empty;
+        public string PublicKey { get; set; } = string.Empty;
+        public string HardwareId { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Challenge response event arguments
+    /// </summary>
+    public class ChallengeResponseEventArgs : EventArgs
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public string ChallengeResponse { get; set; } = string.Empty;
+        public string NewChallenge { get; set; } = string.Empty;
+        public string HardwareId { get; set; } = string.Empty;
+        public bool IsValid { get; set; } = false;
+    }
+
+    /// <summary>
+    /// Authentication verification event arguments
+    /// </summary>
+    public class AuthVerifyEventArgs : EventArgs
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public string ChallengeResponse { get; set; } = string.Empty;
+        public string HardwareId { get; set; } = string.Empty;
+        public bool IsValid { get; set; } = false;
+    }
+
+    /// <summary>
+    /// Authentication success event arguments
+    /// </summary>
+    public class AuthSuccessEventArgs : EventArgs
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public bool Trusted { get; set; } = false;
+        public string HardwareId { get; set; } = string.Empty;
     }
 }

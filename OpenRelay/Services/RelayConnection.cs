@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -7,6 +8,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 using OpenRelay.Models;
+using System.Text.Json.Nodes;
 
 namespace OpenRelay.Services
 {
@@ -18,6 +20,7 @@ namespace OpenRelay.Services
         private readonly string _serverUri;
         private readonly string _localDeviceId;
         private readonly string _localDeviceName;
+        private readonly string _hardwareId;
 
         private ClientWebSocket? _webSocket;
         private string _relayDeviceId = string.Empty;
@@ -25,11 +28,12 @@ namespace OpenRelay.Services
         private bool _isRegistered = false;
         private CancellationTokenSource? _cancellationTokenSource;
 
-        // Events
+        // Event handlers
         public event EventHandler<string>? Connected;
         public event EventHandler? Disconnected;
         public event EventHandler<RelayMessageEventArgs>? MessageReceived;
 
+        // Connection state
         public bool IsConnected => _isConnected && _isRegistered && _webSocket?.State == WebSocketState.Open;
         public string RelayDeviceId => _relayDeviceId;
 
@@ -41,6 +45,10 @@ namespace OpenRelay.Services
             _serverUri = serverUri;
             _localDeviceId = localDeviceId;
             _localDeviceName = localDeviceName;
+
+            // Generate hardware ID
+            _hardwareId = HardwareIdProvider.GetHardwareId();
+            System.Diagnostics.Debug.WriteLine($"[RELAY] Hardware ID: {_hardwareId}");
         }
 
         /// <summary>
@@ -61,10 +69,6 @@ namespace OpenRelay.Services
 
                 // Set options for better compatibility
                 _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
-
-                // Don't use compression (some servers don't support it correctly)
-                // Note: In .NET 5+ this would be:
-                // _webSocket.Options.DangerousDeflateOptions = null;
 
                 // Ensure server URI is correct
                 string serverUri = _serverUri;
@@ -92,7 +96,7 @@ namespace OpenRelay.Services
                 // Start message processing immediately to catch any immediate responses
                 var processingTask = Task.Run(() => ProcessMessagesAsync(_cancellationTokenSource.Token), _cancellationTokenSource.Token);
 
-                // Register with server
+                // Register with server using hardware ID
                 bool registered = await RegisterWithServerAsync(_cancellationTokenSource.Token);
                 if (!registered)
                 {
@@ -155,7 +159,7 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Register with the relay server
+        /// Register with the relay server using hardware ID
         /// </summary>
         private async Task<bool> RegisterWithServerAsync(CancellationToken cancellationToken)
         {
@@ -164,12 +168,20 @@ namespace OpenRelay.Services
 
             try
             {
-                // Create register message - use a simpler approach to ensure format matches exactly
-                string jsonMessage = "{\"type\":\"Register\"}";
+                // Create register message with hardware ID
+                var registerMessage = new
+                {
+                    type = "Register",
+                    payload = new
+                    {
+                        hardware_id = _hardwareId
+                    }
+                };
 
+                // Serialize and send
+                string jsonMessage = JsonSerializer.Serialize(registerMessage);
                 System.Diagnostics.Debug.WriteLine($"[RELAY] Sending registration request: {jsonMessage}");
 
-                // Convert to bytes and send
                 byte[] messageBytes = Encoding.UTF8.GetBytes(jsonMessage);
                 await _webSocket.SendAsync(
                     new ArraySegment<byte>(messageBytes),
@@ -266,10 +278,12 @@ namespace OpenRelay.Services
                             type = messageType,
                             sender_id = _localDeviceId,
                             sender_name = _localDeviceName,
+                            hardware_id = _hardwareId,
                             payload
                         }))),
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         ttl = 300, // 5 minutes
+                        hardware_id = _hardwareId,
                         content_type = "Text",
                         size_bytes = 0 // Will be updated below
                     }
@@ -279,13 +293,16 @@ namespace OpenRelay.Services
                 var json = JsonSerializer.Serialize(relayMessage);
                 var buffer = Encoding.UTF8.GetBytes(json);
 
-                // Update size
-                dynamic dynamicMsg = JsonSerializer.Deserialize<dynamic>(json);
-                dynamicMsg.payload.size_bytes = buffer.Length;
+                // Use JsonNode to modify the JSON
+                var jsonNode = JsonNode.Parse(json);
+                if (jsonNode != null && jsonNode["payload"] != null)
+                {
+                    jsonNode["payload"]["size_bytes"] = buffer.Length;
 
-                // Serialize again with correct size
-                json = JsonSerializer.Serialize(dynamicMsg);
-                buffer = Encoding.UTF8.GetBytes(json);
+                    // Serialize again with correct size
+                    json = jsonNode.ToJsonString();
+                    buffer = Encoding.UTF8.GetBytes(json);
+                }
 
                 System.Diagnostics.Debug.WriteLine($"[RELAY] Sending message to {recipientId}, size: {buffer.Length} bytes");
 
@@ -330,6 +347,7 @@ namespace OpenRelay.Services
                         encrypted_data = encryptedData,
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         ttl = 300, // 5 minutes
+                        hardware_id = _hardwareId,
                         content_type = contentType,
                         size_bytes = encryptedData.Length
                     }
@@ -349,6 +367,164 @@ namespace OpenRelay.Services
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending encrypted data: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Generate a cryptographic challenge for device authentication
+        /// </summary>
+        private string GenerateChallenge()
+        {
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                byte[] challenge = new byte[32]; // 256 bits
+                rng.GetBytes(challenge);
+                return Convert.ToBase64String(challenge);
+            }
+        }
+
+        /// <summary>
+        /// Send authentication challenge to another device
+        /// </summary>
+        public async Task<bool> SendAuthChallengeAsync(string recipientId, string publicKey, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Generate a challenge
+                string challenge = GenerateChallenge();
+
+                // Send auth request with challenge
+                var authRequest = new
+                {
+                    type = "AuthRequest",
+                    payload = new
+                    {
+                        device_id = _relayDeviceId,
+                        public_key = publicKey,
+                        challenge = challenge,
+                        hardware_id = _hardwareId
+                    }
+                };
+
+                // Send the auth request
+                string json = JsonSerializer.Serialize(authRequest);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Sent auth challenge to {recipientId}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending auth challenge: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Send authentication response to a challenge
+        /// </summary>
+        public async Task<bool> SendAuthResponseAsync(string recipientId, string challengeResponse, string newChallenge, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Send auth response
+                var authResponse = new
+                {
+                    type = "AuthResponse",
+                    payload = new
+                    {
+                        device_id = _relayDeviceId,
+                        challenge_response = challengeResponse,
+                        challenge = newChallenge,
+                        hardware_id = _hardwareId
+                    }
+                };
+
+                // Send the auth response
+                string json = JsonSerializer.Serialize(authResponse);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Sent auth response to {recipientId}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending auth response: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Send authentication verification
+        /// </summary>
+        public async Task<bool> SendAuthVerifyAsync(string recipientId, string challengeResponse, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Send auth verification
+                var authVerify = new
+                {
+                    type = "AuthVerify",
+                    payload = new
+                    {
+                        device_id = _relayDeviceId,
+                        challenge_response = challengeResponse,
+                        hardware_id = _hardwareId
+                    }
+                };
+
+                // Send the auth verification
+                string json = JsonSerializer.Serialize(authVerify);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Sent auth verification to {recipientId}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending auth verification: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Send authentication success
+        /// </summary>
+        public async Task<bool> SendAuthSuccessAsync(string recipientId, bool trusted, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Send auth success
+                var authSuccess = new
+                {
+                    type = "AuthSuccess",
+                    payload = new
+                    {
+                        device_id = _relayDeviceId,
+                        trusted = trusted,
+                        hardware_id = _hardwareId
+                    }
+                };
+
+                // Send the auth success
+                string json = JsonSerializer.Serialize(authSuccess);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Sent auth success to {recipientId}, trusted: {trusted}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending auth success: {ex.Message}");
                 return false;
             }
         }
@@ -377,13 +553,6 @@ namespace OpenRelay.Services
                         var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
 
                         System.Diagnostics.Debug.WriteLine($"[RELAY] Received WebSocket frame: Type={result.MessageType}, EndOfMessage={result.EndOfMessage}, Count={result.Count}");
-
-                        //// Log raw bytes for debugging
-                        //if (result.Count > 0)
-                        //{
-                        //    var hexBytes = BitConverter.ToString(buffer, 0, result.Count).Replace("-", " ");
-                        //    System.Diagnostics.Debug.WriteLine($"[RELAY] Raw bytes: {hexBytes}");
-                        //}
 
                         // Check if connection is closed
                         if (result.MessageType == WebSocketMessageType.Close)
@@ -450,6 +619,26 @@ namespace OpenRelay.Services
                                             case "Error":
                                                 System.Diagnostics.Debug.WriteLine("[RELAY] Received error message from server");
                                                 HandleErrorMessage(root);
+                                                break;
+
+                                            case "AuthRequest":
+                                                System.Diagnostics.Debug.WriteLine("[RELAY] Received AuthRequest");
+                                                HandleAuthRequest(root);
+                                                break;
+
+                                            case "AuthResponse":
+                                                System.Diagnostics.Debug.WriteLine("[RELAY] Received AuthResponse");
+                                                HandleAuthResponse(root);
+                                                break;
+
+                                            case "AuthVerify":
+                                                System.Diagnostics.Debug.WriteLine("[RELAY] Received AuthVerify");
+                                                HandleAuthVerify(root);
+                                                break;
+
+                                            case "AuthSuccess":
+                                                System.Diagnostics.Debug.WriteLine("[RELAY] Received AuthSuccess");
+                                                HandleAuthSuccess(root);
                                                 break;
 
                                             default:
@@ -520,6 +709,151 @@ namespace OpenRelay.Services
             {
                 _isConnected = false;
                 Disconnected?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Handle authentication request
+        /// </summary>
+        private void HandleAuthRequest(JsonElement root)
+        {
+            try
+            {
+                if (root.TryGetProperty("payload", out var payload))
+                {
+                    string deviceId = payload.GetProperty("device_id").GetString() ?? string.Empty;
+                    string challenge = payload.GetProperty("challenge").GetString() ?? string.Empty;
+                    string publicKey = payload.GetProperty("public_key").GetString() ?? string.Empty;
+                    string hardwareId = payload.GetProperty("hardware_id").GetString() ?? string.Empty;
+
+                    // Create auth request event args and notify listeners
+                    var args = new AuthRequestEventArgs
+                    {
+                        DeviceId = deviceId,
+                        Challenge = challenge,
+                        PublicKey = publicKey,
+                        HardwareId = hardwareId
+                    };
+
+                    // Forward to network service
+                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(
+                        deviceId,
+                        Guid.NewGuid().ToString(),
+                        JsonSerializer.Serialize(new
+                        {
+                            type = "AuthRequest",
+                            sender_id = deviceId,
+                            public_key = publicKey,
+                            challenge = challenge,
+                            hardware_id = hardwareId
+                        })
+                    ));
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error handling auth request: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle authentication response
+        /// </summary>
+        private void HandleAuthResponse(JsonElement root)
+        {
+            try
+            {
+                if (root.TryGetProperty("payload", out var payload))
+                {
+                    string deviceId = payload.GetProperty("device_id").GetString() ?? string.Empty;
+                    string challengeResponse = payload.GetProperty("challenge_response").GetString() ?? string.Empty;
+                    string challenge = payload.GetProperty("challenge").GetString() ?? string.Empty;
+                    string hardwareId = payload.GetProperty("hardware_id").GetString() ?? string.Empty;
+
+                    // Forward to network service
+                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(
+                        deviceId,
+                        Guid.NewGuid().ToString(),
+                        JsonSerializer.Serialize(new
+                        {
+                            type = "AuthResponse",
+                            sender_id = deviceId,
+                            challenge_response = challengeResponse,
+                            challenge = challenge,
+                            hardware_id = hardwareId
+                        })
+                    ));
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error handling auth response: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle authentication verification
+        /// </summary>
+        private void HandleAuthVerify(JsonElement root)
+        {
+            try
+            {
+                if (root.TryGetProperty("payload", out var payload))
+                {
+                    string deviceId = payload.GetProperty("device_id").GetString() ?? string.Empty;
+                    string challengeResponse = payload.GetProperty("challenge_response").GetString() ?? string.Empty;
+                    string hardwareId = payload.GetProperty("hardware_id").GetString() ?? string.Empty;
+
+                    // Forward to network service
+                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(
+                        deviceId,
+                        Guid.NewGuid().ToString(),
+                        JsonSerializer.Serialize(new
+                        {
+                            type = "AuthVerify",
+                            sender_id = deviceId,
+                            challenge_response = challengeResponse,
+                            hardware_id = hardwareId
+                        })
+                    ));
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error handling auth verify: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handle authentication success
+        /// </summary>
+        private void HandleAuthSuccess(JsonElement root)
+        {
+            try
+            {
+                if (root.TryGetProperty("payload", out var payload))
+                {
+                    string deviceId = payload.GetProperty("device_id").GetString() ?? string.Empty;
+                    bool trusted = payload.GetProperty("trusted").GetBoolean();
+                    string hardwareId = payload.GetProperty("hardware_id").GetString() ?? string.Empty;
+
+                    // Forward to network service
+                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(
+                        deviceId,
+                        Guid.NewGuid().ToString(),
+                        JsonSerializer.Serialize(new
+                        {
+                            type = "AuthSuccess",
+                            sender_id = deviceId,
+                            trusted = trusted,
+                            hardware_id = hardwareId
+                        })
+                    ));
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Error handling auth success: {ex.Message}");
             }
         }
 
@@ -616,10 +950,17 @@ namespace OpenRelay.Services
                         encryptedData = encryptedDataProperty.GetString() ?? string.Empty;
                     }
 
-                    System.Diagnostics.Debug.WriteLine($"[RELAY] Received message from {senderId}, message ID: {messageId}");
+                    // Get hardware ID
+                    string hardwareId = string.Empty;
+                    if (payloadProperty.TryGetProperty("hardware_id", out var hardwareIdProperty))
+                    {
+                        hardwareId = hardwareIdProperty.GetString() ?? string.Empty;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[RELAY] Received message from {senderId} (HW: {hardwareId}), message ID: {messageId}");
 
                     // Notify about received message
-                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(senderId, messageId, encryptedData));
+                    MessageReceived?.Invoke(this, new RelayMessageEventArgs(senderId, messageId, encryptedData, hardwareId));
 
                     // Send acknowledgment
                     _ = SendAcknowledgmentAsync(messageId);
@@ -806,6 +1147,17 @@ namespace OpenRelay.Services
     }
 
     /// <summary>
+    /// Authentication request event args
+    /// </summary>
+    public class AuthRequestEventArgs : EventArgs
+    {
+        public string DeviceId { get; set; } = string.Empty;
+        public string Challenge { get; set; } = string.Empty;
+        public string PublicKey { get; set; } = string.Empty;
+        public string HardwareId { get; set; } = string.Empty;
+    }
+
+    /// <summary>
     /// Event args for relay messages
     /// </summary>
     public class RelayMessageEventArgs : EventArgs
@@ -826,13 +1178,19 @@ namespace OpenRelay.Services
         public string EncryptedData { get; }
 
         /// <summary>
+        /// The hardware ID of the sender
+        /// </summary>
+        public string HardwareId { get; }
+
+        /// <summary>
         /// Create new relay message event args
         /// </summary>
-        public RelayMessageEventArgs(string senderId, string messageId, string encryptedData)
+        public RelayMessageEventArgs(string senderId, string messageId, string encryptedData, string hardwareId = "")
         {
             SenderId = senderId;
             MessageId = messageId;
             EncryptedData = encryptedData;
+            HardwareId = hardwareId;
         }
     }
 }
