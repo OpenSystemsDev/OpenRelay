@@ -404,10 +404,9 @@ namespace OpenRelay.Services
         {
             try
             {
-                // Log the entire message for debugging
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] PairingResponse content: {JsonSerializer.Serialize(root)}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing pairing response: {JsonSerializer.Serialize(root)}");
 
-                // The message structure might be nested inside a payload property
+                // First check if the response has a nested payload structure
                 JsonElement payloadElement;
                 if (root.TryGetProperty("payload", out var payload))
                 {
@@ -420,75 +419,154 @@ namespace OpenRelay.Services
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Using root as payload");
                 }
 
-                // Extract request ID and accepted status
-                string requestId = payloadElement.TryGetProperty("request_id", out var requestIdElement)
-                    ? requestIdElement.GetString() ?? string.Empty
-                    : string.Empty;
+                // Extract request ID - try different potential paths
+                string requestId = string.Empty;
+                if (payloadElement.TryGetProperty("request_id", out var reqIdElement))
+                {
+                    requestId = reqIdElement.GetString() ?? string.Empty;
+                }
+                else if (root.TryGetProperty("request_id", out var rootReqIdElement))
+                {
+                    requestId = rootReqIdElement.GetString() ?? string.Empty;
+                }
 
-                bool accepted = payloadElement.TryGetProperty("accepted", out var acceptedElement)
-                    ? acceptedElement.GetBoolean()
-                    : false;
+                // Extract accepted status
+                bool accepted = false;
+                if (payloadElement.TryGetProperty("accepted", out var acceptedElement))
+                {
+                    accepted = acceptedElement.GetBoolean();
+                }
+                else if (root.TryGetProperty("accepted", out var rootAcceptedElement))
+                {
+                    accepted = rootAcceptedElement.GetBoolean();
+                }
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Relay pairing response for request {requestId}: {accepted}");
 
                 // If we have a pending request for this ID, complete it
-                if (_pairingRequests.TryGetValue(requestId, out var tcs))
+                if (!string.IsNullOrEmpty(requestId) && _pairingRequests.TryGetValue(requestId, out var tcs))
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Found pending pairing request: {requestId}");
 
                     // If accepted, get the device info and shared key
                     if (accepted)
                     {
-                        string deviceId = payloadElement.TryGetProperty("device_id", out var deviceIdElement)
-                            ? deviceIdElement.GetString() ?? string.Empty
-                            : string.Empty;
+                        string deviceId = string.Empty;
+                        string deviceName = string.Empty;
+                        string sharedKey = string.Empty;
+                        string responseHardwareId = hardwareId; // Default to the passed in hardwareId
 
-                        string deviceName = payloadElement.TryGetProperty("device_name", out var deviceNameElement)
-                            ? deviceNameElement.GetString() ?? string.Empty
-                            : "Unknown Device";
+                        // Try to get these values from payload first, then from root
+                        if (payloadElement.TryGetProperty("device_id", out var deviceIdElement))
+                        {
+                            deviceId = deviceIdElement.GetString() ?? string.Empty;
+                        }
+                        else if (root.TryGetProperty("device_id", out var rootDeviceIdElement))
+                        {
+                            deviceId = rootDeviceIdElement.GetString() ?? string.Empty;
+                        }
+                        else if (root.TryGetProperty("sender_id", out var senderIdElement))
+                        {
+                            deviceId = senderIdElement.GetString() ?? string.Empty;
+                        }
 
-                        string sharedKey = payloadElement.TryGetProperty("encrypted_shared_key", out var sharedKeyElement)
-                            ? sharedKeyElement.GetString() ?? string.Empty
-                            : string.Empty;
+                        if (payloadElement.TryGetProperty("device_name", out var deviceNameElement))
+                        {
+                            deviceName = deviceNameElement.GetString() ?? string.Empty;
+                        }
+                        else if (root.TryGetProperty("device_name", out var rootDeviceNameElement))
+                        {
+                            deviceName = rootDeviceNameElement.GetString() ?? string.Empty;
+                        }
+                        else if (root.TryGetProperty("sender_name", out var senderNameElement))
+                        {
+                            deviceName = senderNameElement.GetString() ?? string.Empty;
+                        }
+
+                        if (payloadElement.TryGetProperty("encrypted_shared_key", out var sharedKeyElement))
+                        {
+                            sharedKey = sharedKeyElement.GetString() ?? string.Empty;
+                        }
+                        else if (root.TryGetProperty("encrypted_shared_key", out var rootSharedKeyElement))
+                        {
+                            sharedKey = rootSharedKeyElement.GetString() ?? string.Empty;
+                        }
+
+                        // Try to get hardware ID from the message
+                        if (payloadElement.TryGetProperty("hardware_id", out var hwIdElement))
+                        {
+                            responseHardwareId = hwIdElement.GetString() ?? responseHardwareId;
+                        }
+                        else if (root.TryGetProperty("hardware_id", out var rootHwIdElement))
+                        {
+                            responseHardwareId = rootHwIdElement.GetString() ?? responseHardwareId;
+                        }
 
                         if (!string.IsNullOrEmpty(deviceId) && !string.IsNullOrEmpty(sharedKey))
                         {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating paired device from relay pairing: {deviceName} ({deviceId})");
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating paired device from relay pairing: {deviceName} ({deviceId}), Hardware ID: {responseHardwareId}");
 
                             // Create and add the device
                             var device = new PairedDevice
                             {
                                 DeviceId = deviceId,
                                 DeviceName = deviceName,
-                                Platform = payloadElement.TryGetProperty("platform", out var platformElement)
-                                    ? platformElement.GetString() ?? "Unknown"
-                                    : "Unknown",
+                                Platform = payloadElement.TryGetProperty("platform", out var platformElement) ?
+                                    platformElement.GetString() ?? "Unknown" : "Unknown",
                                 SharedKey = sharedKey,
                                 CurrentKeyId = _encryptionService.GetCurrentKeyId(),
                                 LastSeen = DateTime.Now,
-                                HardwareId = hardwareId,
+                                HardwareId = responseHardwareId,
                                 IsRelayPaired = true,
                                 RelayDeviceId = senderId
                             };
 
                             // Check for challenge-response data
-                            if (payloadElement.TryGetProperty("challenge_response", out var responseElement) &&
-                                payloadElement.TryGetProperty("challenge", out var challengeElement) &&
-                                payloadElement.TryGetProperty("public_key", out var keyElement))
-                            {
-                                string challengeResponse = responseElement.GetString() ?? string.Empty;
-                                string challenge = challengeElement.GetString() ?? string.Empty;
-                                string publicKey = keyElement.GetString() ?? string.Empty;
+                            string challengeResponse = string.Empty;
+                            string challenge = string.Empty;
+                            string publicKey = string.Empty;
 
-                                // Store public key
+                            if (payloadElement.TryGetProperty("challenge_response", out var responseElement))
+                            {
+                                challengeResponse = responseElement.GetString() ?? string.Empty;
+                            }
+                            else if (root.TryGetProperty("challenge_response", out var rootResponseElement))
+                            {
+                                challengeResponse = rootResponseElement.GetString() ?? string.Empty;
+                            }
+
+                            if (payloadElement.TryGetProperty("challenge", out var challengeElement))
+                            {
+                                challenge = challengeElement.GetString() ?? string.Empty;
+                            }
+                            else if (root.TryGetProperty("challenge", out var rootChallengeElement))
+                            {
+                                challenge = rootChallengeElement.GetString() ?? string.Empty;
+                            }
+
+                            if (payloadElement.TryGetProperty("public_key", out var keyElement))
+                            {
+                                publicKey = keyElement.GetString() ?? string.Empty;
+                            }
+                            else if (root.TryGetProperty("public_key", out var rootKeyElement))
+                            {
+                                publicKey = rootKeyElement.GetString() ?? string.Empty;
+                            }
+
+                            // Store public key if available
+                            if (!string.IsNullOrEmpty(publicKey))
+                            {
                                 device.PublicKey = publicKey;
                             }
 
                             _deviceManager.AddOrUpdateDevice(device);
+
+                            // Debug message to verify hardware ID mapping
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Mapped Device ID {deviceId} to Hardware ID {responseHardwareId}");
                         }
                         else
                         {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Missing required fields in pairing response");
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Missing required fields in pairing response. DeviceId: {deviceId}, SharedKey: {!string.IsNullOrEmpty(sharedKey)}");
                         }
                     }
 
@@ -500,12 +578,6 @@ namespace OpenRelay.Services
                 else
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] No pending request found for ID: {requestId}");
-
-                    // Debug all pending requests
-                    foreach (var key in _pairingRequests.Keys)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pending request ID: {key}");
-                    }
                 }
             }
             catch (Exception ex)
@@ -514,6 +586,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Stack trace: {ex.StackTrace}");
             }
         }
+
 
         /// <summary>
         /// Process relay pairing request message
@@ -885,69 +958,199 @@ namespace OpenRelay.Services
         {
             try
             {
-                // Find the device
-                var device = _deviceManager.GetDeviceById(senderId);
-                if (device == null && !string.IsNullOrEmpty(senderHwId))
-                {
-                    device = _deviceManager.GetDeviceByHardwareId(senderHwId);
-                }
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing encrypted clipboard data from {senderId}, Hardware ID: {senderHwId}");
 
-                if (device == null)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown device ID for clipboard data: {senderId}");
-                    return;
-                }
+                // Find device first - declared at method scope level
+                PairedDevice foundDevice = null;
 
-                // Verify the sender is authenticated if hardware ID is provided
-                if (!string.IsNullOrEmpty(senderHwId) && !device.IsAuthenticated)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received clipboard data from unauthenticated device: {device.DeviceName}");
-                    return;
-                }
-
-                // Try to parse the JSON structure for clipboard data
+                // Try to parse the JSON structure for clipboard data first - using base64 decoding
                 try
                 {
-                    var data = JsonSerializer.Deserialize<ClipboardUpdateMessage>(Encoding.UTF8.GetString(Convert.FromBase64String(encryptedData)));
-                    if (data != null)
+                    byte[] decodedBytes = Convert.FromBase64String(encryptedData);
+                    string decodedText = Encoding.UTF8.GetString(decodedBytes);
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Decoded data preview: {decodedText.Substring(0, Math.Min(100, decodedText.Length))}...");
+
+                    var jsonDoc = JsonDocument.Parse(decodedText);
+                    var root = jsonDoc.RootElement;
+
+                    if (root.TryGetProperty("type", out var typeProperty) &&
+                        typeProperty.GetString() == "ClipboardUpdate")
                     {
-                        // Check if hardware ID matches if provided
-                        if (!string.IsNullOrEmpty(senderHwId) && !string.IsNullOrEmpty(device.HardwareId) &&
-                            senderHwId != device.HardwareId)
+                        // Use the decoded message's device ID and hardware ID if available
+                        string deviceIdFromMessage = root.TryGetProperty("device_id", out var deviceIdElement) ?
+                            deviceIdElement.GetString() ?? senderId : senderId;
+
+                        string hwIdFromMessage = root.TryGetProperty("hardware_id", out var hwIdElement) ?
+                            hwIdElement.GetString() ?? senderHwId : senderHwId;
+
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Message contains device ID: {deviceIdFromMessage}, hardware ID: {hwIdFromMessage}");
+
+                        // Try by hardware ID first (most reliable)
+                        if (!string.IsNullOrEmpty(hwIdFromMessage))
                         {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Hardware ID mismatch: {senderHwId} vs {device.HardwareId}");
-                            return;
+                            foundDevice = _deviceManager.GetDeviceByHardwareId(hwIdFromMessage);
+
+                            // If found by hardware ID but device ID doesn't match, update it
+                            if (foundDevice != null && foundDevice.DeviceId != deviceIdFromMessage)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Found device by hardware ID, updating device ID from {foundDevice.DeviceId} to {deviceIdFromMessage}");
+                                foundDevice.DeviceId = deviceIdFromMessage;
+                                _deviceManager.UpdateDevice(foundDevice);
+                            }
                         }
 
+                        // If not found by hardware ID, try by deviceID
+                        if (foundDevice == null)
+                        {
+                            foundDevice = _deviceManager.GetDeviceById(deviceIdFromMessage);
+
+                            // If found by device ID but hardware ID doesn't match or is empty, update it
+                            if (foundDevice != null && !string.IsNullOrEmpty(hwIdFromMessage) &&
+                                (string.IsNullOrEmpty(foundDevice.HardwareId) || foundDevice.HardwareId != hwIdFromMessage))
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Updating hardware ID from {foundDevice.HardwareId} to {hwIdFromMessage}");
+                                foundDevice.HardwareId = hwIdFromMessage;
+                                _deviceManager.UpdateDevice(foundDevice);
+                            }
+                        }
+
+                        // Fallback: try with sender ID if different from device ID in message
+                        if (foundDevice == null && deviceIdFromMessage != senderId)
+                        {
+                            foundDevice = _deviceManager.GetDeviceById(senderId);
+                        }
+
+                        if (foundDevice != null)
+                        {
+                            // Get clipboard data from the message
+                            var format = root.GetProperty("format").GetString() ?? string.Empty;
+                            var data = root.GetProperty("data").GetString() ?? string.Empty;
+                            var isBinary = root.TryGetProperty("is_binary", out var isBinaryElement) ?
+                                isBinaryElement.GetBoolean() : false;
+
+                            // Decrypt the data
+                            ClipboardData clipboardData = null;
+
+                            if (format == "text/plain" && !isBinary && !string.IsNullOrEmpty(data))
+                            {
+                                try
+                                {
+                                    var decryptedText = _encryptionService.DecryptText(data, foundDevice.SharedKey);
+                                    clipboardData = ClipboardData.CreateText(decryptedText);
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully decrypted text data, length: {decryptedText.Length}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting text: {ex.Message}");
+                                }
+                            }
+                            else if (format == "image/png" && isBinary && !string.IsNullOrEmpty(data))
+                            {
+                                try
+                                {
+                                    var encryptedBytes = Convert.FromBase64String(data);
+                                    var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(foundDevice.SharedKey));
+                                    clipboardData = ClipboardData.CreateImage(decryptedBytes);
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully decrypted image data, size: {decryptedBytes.Length} bytes");
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting image: {ex.Message}");
+                                }
+                            }
+
+                            if (clipboardData != null)
+                            {
+                                // Update device last seen
+                                _deviceManager.UpdateDeviceLastSeen(foundDevice.DeviceId);
+
+                                // Notify listeners
+                                ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, foundDevice));
+                            }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to create clipboard data");
+                            }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not find device for message. Sender: {senderId}, Message device ID: {deviceIdFromMessage}, Hardware ID: {hwIdFromMessage}");
+                        }
+
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decoding JSON clipboard data: {ex.Message}");
+                    // Continue with standard processing
+                }
+
+                // Standard processing as fallback
+                foundDevice = _deviceManager.GetDeviceById(senderId);
+                if (foundDevice == null && !string.IsNullOrEmpty(senderHwId))
+                {
+                    foundDevice = _deviceManager.GetDeviceByHardwareId(senderHwId);
+
+                    // If found by hardware ID, update its device ID to match the current sender
+                    if (foundDevice != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Found device {foundDevice.DeviceName} by hardware ID, updating device ID from {foundDevice.DeviceId} to {senderId}");
+                        foundDevice.DeviceId = senderId;
+                        _deviceManager.UpdateDevice(foundDevice);
+                    }
+                }
+
+                if (foundDevice == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown device for clipboard data: ID={senderId}, HwID={senderHwId}");
+                    return;
+                }
+
+                // Update hardware ID if needed
+                if (!string.IsNullOrEmpty(senderHwId) && (string.IsNullOrEmpty(foundDevice.HardwareId) || foundDevice.HardwareId != senderHwId))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Updating hardware ID for device {foundDevice.DeviceName} ({foundDevice.DeviceId}): {senderHwId}");
+                    foundDevice.HardwareId = senderHwId;
+                    _deviceManager.UpdateDevice(foundDevice);
+                }
+
+                // Standard clipboard data deserialization and processing
+                try
+                {
+                    var clipboardUpdate = JsonSerializer.Deserialize<ClipboardUpdateMessage>(Encoding.UTF8.GetString(Convert.FromBase64String(encryptedData)));
+                    if (clipboardUpdate != null)
+                    {
                         // Decrypt clipboard data
-                        if (!string.IsNullOrEmpty(data.Data) && !string.IsNullOrEmpty(device.SharedKey))
+                        if (!string.IsNullOrEmpty(clipboardUpdate.Data) && !string.IsNullOrEmpty(foundDevice.SharedKey))
                         {
                             ClipboardData clipboardData;
 
-                            if (data.Format == "text/plain" && !data.IsBinary)
+                            if (clipboardUpdate.Format == "text/plain" && !clipboardUpdate.IsBinary)
                             {
                                 // Decrypt text
-                                var decryptedText = _encryptionService.DecryptText(data.Data, device.SharedKey);
+                                var decryptedText = _encryptionService.DecryptText(clipboardUpdate.Data, foundDevice.SharedKey);
                                 clipboardData = ClipboardData.CreateText(decryptedText);
                             }
-                            else if (data.Format == "image/png" && data.IsBinary)
+                            else if (clipboardUpdate.Format == "image/png" && clipboardUpdate.IsBinary)
                             {
                                 // Decrypt binary data
-                                var encryptedBytes = Convert.FromBase64String(data.Data);
-                                var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
+                                var encryptedBytes = Convert.FromBase64String(clipboardUpdate.Data);
+                                var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(foundDevice.SharedKey));
                                 clipboardData = ClipboardData.CreateImage(decryptedBytes);
                             }
                             else
                             {
-                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {data.Format}");
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {clipboardUpdate.Format}");
                                 return;
                             }
 
                             // Update device last seen
-                            _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+                            _deviceManager.UpdateDeviceLastSeen(foundDevice.DeviceId);
 
                             // Notify listeners
-                            ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
+                            ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, foundDevice));
                         }
                     }
                 }
@@ -961,6 +1164,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing encrypted data: {ex.Message}");
             }
         }
+
 
         /// <summary>
         /// Accept incoming WebSocket connections
@@ -2306,7 +2510,10 @@ namespace OpenRelay.Services
                 string challenge = _deviceManager.GenerateChallenge();
                 string publicKey = _deviceManager.GetPublicKey();
 
-                // Create pairing request
+                // Create pairing request with a specific request ID
+                string requestId = Guid.NewGuid().ToString();
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Created pairing request with ID: {requestId}");
+
                 var request = new PairingRequestMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
@@ -2314,12 +2521,16 @@ namespace OpenRelay.Services
                     HardwareId = _deviceManager.LocalHardwareId,
                     Platform = _deviceManager.LocalPlatform,
                     Challenge = challenge,
-                    PublicKey = publicKey
+                    PublicKey = publicKey,
+                    RequestId = requestId // Make sure the request ID is set
                 };
 
                 // Create task completion source for response
                 var tcs = new TaskCompletionSource<bool>();
-                _pairingRequests[request.RequestId] = tcs;
+                _pairingRequests[requestId] = tcs;
+
+                // Debug output to verify the pending request was added
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Added pending request {requestId} to dictionary");
 
                 // Send request via relay server
                 await _relayConnection.SendMessageAsync(targetDeviceId, "PairingRequest", request);
@@ -2333,7 +2544,7 @@ namespace OpenRelay.Services
                 {
                     // Timeout
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Relay pairing request timed out");
-                    _pairingRequests.Remove(request.RequestId);
+                    _pairingRequests.Remove(requestId);
                     return false;
                 }
             }
@@ -2343,6 +2554,7 @@ namespace OpenRelay.Services
                 return false;
             }
         }
+
 
         /// <summary>
         /// Send a message to a WebSocket client
@@ -2541,6 +2753,7 @@ namespace OpenRelay.Services
                 // Encrypt the data
                 string encryptedData;
                 bool isBinary = false;
+
                 // Determine the proper content type for the relay server
                 string contentType = "Text"; // Default to Text
 
@@ -2577,30 +2790,32 @@ namespace OpenRelay.Services
                     KeyId = _encryptionService.GetCurrentKeyId()
                 };
 
-                // CHANGE: Check if the message is too large (>50KB) and needs chunking
-                int maxChunkSize = 50 * 1024; // 50KB max chunk size
+                // Serialize message to JSON
                 string messageJson = JsonSerializer.Serialize(message);
                 byte[] messageBytes = Encoding.UTF8.GetBytes(messageJson);
+
+                // IMPORTANT: Use Base64 encoding for the relay server
+                string base64Message = Convert.ToBase64String(messageBytes);
+
+                // Check size and handle chunking if needed
+                int maxChunkSize = 50 * 1024; // 50KB max chunk size
 
                 if (messageBytes.Length > maxChunkSize)
                 {
                     // Need to chunk the data as it's too large
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Message size ({messageBytes.Length} bytes) exceeds max chunk size, splitting into chunks");
-
-                    // Create a chunked message series
                     await SendChunkedClipboardDataAsync(device.RelayDeviceId, message, encryptedData, cancellationToken);
                 }
                 else
                 {
                     // Message is small enough to send in one go
-                    // Serialize message
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending clipboard data as single message ({messageBytes.Length} bytes)");
 
-                    // Send via relay server - IMPORTANT: Using proper content type mapping
+                    // Send via relay server using the proper content type
                     await _relayConnection.SendEncryptedDataAsync(
                         device.RelayDeviceId,
-                        Convert.ToBase64String(messageBytes),
-                        contentType, // Updated to proper content type expected by server
+                        base64Message,
+                        contentType, // This should be either "Text" or "Image"
                         cancellationToken);
                 }
 
@@ -2636,10 +2851,10 @@ namespace OpenRelay.Services
                 // Send each chunk with metadata
                 for (int i = 0; i < chunks.Count; i++)
                 {
-                    // Create chunk message
+                    // Create chunk message - using a simplified approach
                     var chunkMessage = new
                     {
-                        type = "ClipboardChunk", // New message type for chunks
+                        type = "ClipboardChunk", // Keep message type
                         sender_id = _deviceManager.LocalDeviceId,
                         sender_name = _deviceManager.LocalDeviceName,
                         hardware_id = _deviceManager.LocalHardwareId,
@@ -2655,16 +2870,18 @@ namespace OpenRelay.Services
 
                     // Serialize and send
                     string chunkJson = JsonSerializer.Serialize(chunkMessage);
+                    byte[] chunkBytes = Encoding.UTF8.GetBytes(chunkJson);
+                    string base64Chunk = Convert.ToBase64String(chunkBytes);
 
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {i + 1}/{chunks.Count}, size: {chunks[i].Length} chars");
 
-                    // Determine proper content type
-                    string contentType = message.IsBinary ? "Image" : "Text";
+                    // Determine proper content type - always use Text for chunks
+                    string contentType = "Text";
 
-                    await _relayConnection.SendMessageAsync(
+                    await _relayConnection.SendEncryptedDataAsync(
                         recipientId,
-                        "ClipboardChunk",
-                        chunkMessage,
+                        base64Chunk,
+                        contentType,
                         cancellationToken);
 
                     // Brief delay between chunks to avoid overwhelming the server

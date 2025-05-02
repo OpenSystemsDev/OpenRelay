@@ -331,6 +331,51 @@ namespace OpenRelay.Services
                     return false;
                 }
 
+                // Special handling for PairingRequest to preserve request_id
+                string encryptedData;
+                if (messageType == "PairingRequest" && payload is PairingRequestMessage pairingRequest)
+                {
+                    var wrapper = new
+                    {
+                        type = messageType,
+                        sender_id = _localDeviceId,
+                        sender_name = _localDeviceName,
+                        hardware_id = _hardwareId,
+                        payload = new
+                        {
+                            request_id = pairingRequest.RequestId,
+                            device_id = pairingRequest.DeviceId,
+                            device_name = pairingRequest.DeviceName,
+                            platform = pairingRequest.Platform,
+                            public_key = pairingRequest.PublicKey,
+                            challenge = pairingRequest.Challenge,
+                            hardware_id = pairingRequest.HardwareId
+                        }
+                    };
+
+                    encryptedData = Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(JsonSerializer.Serialize(wrapper))
+                    );
+
+                    System.Diagnostics.Debug.WriteLine($"[RELAY] Sending PairingRequest with request_id: {pairingRequest.RequestId}");
+                }
+                else
+                {
+                    // Standard message handling
+                    var messageData = new
+                    {
+                        type = messageType,
+                        sender_id = _localDeviceId,
+                        sender_name = _localDeviceName,
+                        hardware_id = _hardwareId,
+                        payload = payload
+                    };
+
+                    encryptedData = Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(JsonSerializer.Serialize(messageData))
+                    );
+                }
+
                 // Create relay message
                 var relayMessage = new
                 {
@@ -340,40 +385,20 @@ namespace OpenRelay.Services
                         recipient_id = recipientId,
                         sender_id = _relayDeviceId,
                         message_id = Guid.NewGuid().ToString(),
-                        encrypted_data = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
-                        {
-                            type = messageType,
-                            sender_id = _localDeviceId,
-                            sender_name = _localDeviceName,
-                            hardware_id = _hardwareId,
-                            payload
-                        }))),
+                        encrypted_data = encryptedData,
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         ttl = 300, // 5 minutes
                         hardware_id = _hardwareId,
-                        content_type = "Text",
-                        size_bytes = 0 // Will be updated below
+                        content_type = "Text", // Use Text for all non-binary messages
+                        size_bytes = encryptedData.Length
                     }
                 };
 
-                // Calculate size
+                // Send message
                 var json = JsonSerializer.Serialize(relayMessage);
                 var buffer = Encoding.UTF8.GetBytes(json);
 
-                // Use JsonNode to modify the JSON
-                var jsonNode = JsonNode.Parse(json);
-                if (jsonNode != null && jsonNode["payload"] != null)
-                {
-                    jsonNode["payload"]["size_bytes"] = buffer.Length;
-
-                    // Serialize again with correct size
-                    json = jsonNode.ToJsonString();
-                    buffer = Encoding.UTF8.GetBytes(json);
-                }
-
-                System.Diagnostics.Debug.WriteLine($"[RELAY] Sending message to {recipientId}, size: {buffer.Length} bytes");
-
-                // Send message
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Sending {messageType} message to {recipientId}, size: {buffer.Length} bytes");
                 await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
 
                 return true;
@@ -384,6 +409,7 @@ namespace OpenRelay.Services
                 return false;
             }
         }
+
 
         /// <summary>
         /// Send encrypted data to another device via the relay server
@@ -402,7 +428,7 @@ namespace OpenRelay.Services
                     return false;
                 }
 
-                // Create relay message
+                // Create relay message with the correct content type mapping
                 var relayMessage = new
                 {
                     type = "Send",
@@ -415,7 +441,7 @@ namespace OpenRelay.Services
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         ttl = 300, // 5 minutes
                         hardware_id = _hardwareId,
-                        content_type = contentType,
+                        content_type = contentType, // This should be either "Text" or "Image"
                         size_bytes = Encoding.UTF8.GetByteCount(encryptedData)
                     }
                 };
@@ -471,6 +497,7 @@ namespace OpenRelay.Services
                 return false;
             }
         }
+
 
 
         /// <summary>
