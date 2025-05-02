@@ -416,27 +416,62 @@ namespace OpenRelay.Services
                         ttl = 300, // 5 minutes
                         hardware_id = _hardwareId,
                         content_type = contentType,
-                        size_bytes = encryptedData.Length
+                        size_bytes = Encoding.UTF8.GetByteCount(encryptedData)
                     }
                 };
 
-                // Serialize message
-                var json = JsonSerializer.Serialize(relayMessage);
+                // Serialize message - use indentation=false for more compact JSON
+                var options = new JsonSerializerOptions { WriteIndented = false };
+                var json = JsonSerializer.Serialize(relayMessage, options);
+
+                // Check the size - warn about large messages
                 var buffer = Encoding.UTF8.GetBytes(json);
+                if (buffer.Length > 1024 * 250) // 250KB
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RELAY] WARNING: Message is very large ({buffer.Length / 1024}KB)");
+                }
 
                 System.Diagnostics.Debug.WriteLine($"[RELAY] Sending encrypted data to {recipientId}, size: {buffer.Length} bytes");
 
-                // Send message
-                await _webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+                // For large messages send in chunks
+                int chunkSize = 16 * 1024; // 16KB chunks for WebSocket frames
+                int totalSent = 0;
+
+                while (totalSent < buffer.Length)
+                {
+                    int currentChunkSize = Math.Min(chunkSize, buffer.Length - totalSent);
+                    bool isLastChunk = (totalSent + currentChunkSize) >= buffer.Length;
+
+                    // Send the chunk
+                    await _webSocket.SendAsync(
+                        new ArraySegment<byte>(buffer, totalSent, currentChunkSize),
+                        WebSocketMessageType.Text,
+                        isLastChunk, // EndOfMessage only true for last chunk
+                        cancellationToken);
+
+                    totalSent += currentChunkSize;
+
+                    // Small delay between chunks to avoid overwhelming the server
+                    if (!isLastChunk)
+                    {
+                        await Task.Delay(20, cancellationToken);
+                    }
+                }
 
                 return true;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[RELAY] Error sending encrypted data: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RELAY] Inner exception: {ex.InnerException.Message}");
+                }
+                System.Diagnostics.Debug.WriteLine($"[RELAY] Stack trace: {ex.StackTrace}");
                 return false;
             }
         }
+
 
         /// <summary>
         /// Generate a cryptographic challenge for device authentication

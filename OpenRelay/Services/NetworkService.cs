@@ -59,6 +59,11 @@ namespace OpenRelay.Services
         // Pending pairing requests
         private readonly Dictionary<string, TaskCompletionSource<bool>> _pairingRequests = new Dictionary<string, TaskCompletionSource<bool>>();
 
+        // Store chunks for reassembly
+        private readonly Dictionary<string, Dictionary<int, string>> _clipboardChunks = new Dictionary<string, Dictionary<int, string>>();
+        private readonly Dictionary<string, (int count, string format, bool isBinary, uint keyId, long timestamp, string senderId, string senderName)> _chunkMetadata = new Dictionary<string, (int, string, bool, uint, long, string, string)>();
+
+
         // Relay server connection
         internal RelayConnection? _relayConnection;
         private bool _isConnectedToRelayServer = false;
@@ -365,10 +370,15 @@ namespace OpenRelay.Services
                                 ProcessAuthSuccessMessage(root, e.SenderId, e.HardwareId);
                                 break;
 
+                            case "ClipboardChunk":
+                                ProcessClipboardChunk(root, e.SenderId, e.HardwareId);
+                                break;
+
                             default:
                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown relay message type: {messageType}, Full message: {decodedContent.Substring(0, Math.Min(200, decodedContent.Length))}...");
                                 break;
                         }
+
                     }
                 }
                 catch (JsonException jsonEx)
@@ -2495,7 +2505,7 @@ namespace OpenRelay.Services
         }
 
         /// <summary>
-        /// Send clipboard data via relay server
+        /// Send clipboard data via relay server with chunking for large content
         /// </summary>
         private async Task SendClipboardDataViaRelayAsync(ClipboardData data, PairedDevice device, CancellationToken cancellationToken)
         {
@@ -2563,21 +2573,263 @@ namespace OpenRelay.Services
                     KeyId = _encryptionService.GetCurrentKeyId()
                 };
 
-                // Serialize message
-                var json = JsonSerializer.Serialize(message);
+                // CHANGE: Check if the message is too large (>50KB) and needs chunking
+                int maxChunkSize = 50 * 1024; // 50KB max chunk size
+                string messageJson = JsonSerializer.Serialize(message);
+                byte[] messageBytes = Encoding.UTF8.GetBytes(messageJson);
 
-                // Send via relay server
-                await _relayConnection.SendEncryptedDataAsync(
-                    device.RelayDeviceId,
-                    Convert.ToBase64String(Encoding.UTF8.GetBytes(json)),
-                    "ClipboardUpdate",
-                    cancellationToken);
+                if (messageBytes.Length > maxChunkSize)
+                {
+                    // Need to chunk the data as it's too large
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Message size ({messageBytes.Length} bytes) exceeds max chunk size, splitting into chunks");
+
+                    // Create a chunked message series
+                    await SendChunkedClipboardDataAsync(device.RelayDeviceId, message, encryptedData, cancellationToken);
+                }
+                else
+                {
+                    // Message is small enough to send in one go
+                    // Serialize message
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending clipboard data as single message ({messageBytes.Length} bytes)");
+
+                    // Send via relay server
+                    await _relayConnection.SendEncryptedDataAsync(
+                        device.RelayDeviceId,
+                        Convert.ToBase64String(messageBytes),
+                        "ClipboardUpdate",
+                        cancellationToken);
+                }
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent via relay to {device.DeviceName}");
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data via relay: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Send large clipboard data in chunks via relay server
+        /// </summary>
+        private async Task SendChunkedClipboardDataAsync(string recipientId, ClipboardUpdateMessage message, string originalEncryptedData, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Constants for chunking
+                const int maxChunkSize = 40 * 1024; // 40KB chunks to be safe
+                string chunkId = Guid.NewGuid().ToString(); // Unique ID for this chunked message set
+
+                // Split the encrypted data into chunks
+                List<string> chunks = new List<string>();
+                for (int i = 0; i < originalEncryptedData.Length; i += maxChunkSize)
+                {
+                    int length = Math.Min(maxChunkSize, originalEncryptedData.Length - i);
+                    chunks.Add(originalEncryptedData.Substring(i, length));
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Splitting clipboard data into {chunks.Count} chunks");
+
+                // Send each chunk with metadata
+                for (int i = 0; i < chunks.Count; i++)
+                {
+                    // Create chunk message
+                    var chunkMessage = new
+                    {
+                        type = "ClipboardChunk", // New message type for chunks
+                        sender_id = _deviceManager.LocalDeviceId,
+                        sender_name = _deviceManager.LocalDeviceName,
+                        hardware_id = _deviceManager.LocalHardwareId,
+                        format = message.Format,
+                        is_binary = message.IsBinary,
+                        key_id = message.KeyId,
+                        chunk_id = chunkId, // ID to associate chunks together
+                        chunk_index = i,
+                        chunk_count = chunks.Count,
+                        chunk_data = chunks[i],
+                        timestamp = message.Timestamp
+                    };
+
+                    // Serialize and send
+                    string chunkJson = JsonSerializer.Serialize(chunkMessage);
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {i + 1}/{chunks.Count}, size: {chunks[i].Length} chars");
+
+                    await _relayConnection.SendMessageAsync(
+                        recipientId,
+                        "ClipboardChunk",
+                        chunkMessage,
+                        cancellationToken);
+
+                    // Brief delay between chunks to avoid overwhelming the server
+                    if (i < chunks.Count - 1)
+                    {
+                        await Task.Delay(50, cancellationToken);
+                    }
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] All {chunks.Count} chunks sent successfully");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending chunked clipboard data: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Process a received clipboard chunk
+        /// </summary>
+        private void ProcessClipboardChunk(JsonElement root, string senderId, string hardwareId)
+        {
+            try
+            {
+                // Extract chunk information
+                string chunkId = root.GetProperty("chunk_id").GetString() ?? string.Empty;
+                int chunkIndex = root.GetProperty("chunk_index").GetInt32();
+                int chunkCount = root.GetProperty("chunk_count").GetInt32();
+                string chunkData = root.GetProperty("chunk_data").GetString() ?? string.Empty;
+                string format = root.GetProperty("format").GetString() ?? string.Empty;
+                bool isBinary = root.GetProperty("is_binary").GetBoolean();
+                uint keyId = root.GetProperty("key_id").GetUInt32();
+                long timestamp = root.GetProperty("timestamp").GetInt64();
+                string senderIdFromMessage = root.GetProperty("sender_id").GetString() ?? string.Empty;
+                string senderName = root.GetProperty("sender_name").GetString() ?? string.Empty;
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received clipboard chunk {chunkIndex + 1}/{chunkCount} for ID {chunkId}");
+
+                // Store the chunk
+                if (!_clipboardChunks.ContainsKey(chunkId))
+                {
+                    _clipboardChunks[chunkId] = new Dictionary<int, string>();
+                    _chunkMetadata[chunkId] = (chunkCount, format, isBinary, keyId, timestamp, senderIdFromMessage, senderName);
+                }
+
+                _clipboardChunks[chunkId][chunkIndex] = chunkData;
+
+                // Check if we have all chunks
+                if (_clipboardChunks[chunkId].Count == chunkCount)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] All {chunkCount} chunks received for {chunkId}, reassembling");
+
+                    // Reassemble the complete data
+                    StringBuilder dataBuilder = new StringBuilder();
+                    for (int i = 0; i < chunkCount; i++)
+                    {
+                        if (_clipboardChunks[chunkId].TryGetValue(i, out string chunk))
+                        {
+                            dataBuilder.Append(chunk);
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Missing chunk {i} for {chunkId}, cannot reassemble");
+                            return;
+                        }
+                    }
+
+                    // Get metadata
+                    var metadata = _chunkMetadata[chunkId];
+
+                    // Create a complete clipboard update message
+                    var clipboardMessage = new ClipboardUpdateMessage
+                    {
+                        DeviceId = metadata.senderId,
+                        DeviceName = metadata.senderName,
+                        Format = metadata.format,
+                        Data = dataBuilder.ToString(),
+                        IsBinary = metadata.isBinary,
+                        Timestamp = metadata.timestamp,
+                        KeyId = metadata.keyId,
+                        HardwareId = hardwareId
+                    };
+
+                    // Find the device
+                    var device = _deviceManager.GetDeviceById(metadata.senderId);
+                    if (device == null && !string.IsNullOrEmpty(hardwareId))
+                    {
+                        device = _deviceManager.GetDeviceByHardwareId(hardwareId);
+                    }
+
+                    if (device != null)
+                    {
+                        // Process the reassembled clipboard data
+                        ProcessReassembledClipboardData(clipboardMessage, device);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown device {metadata.senderId} for reassembled clipboard data");
+                    }
+
+                    // Clean up
+                    _clipboardChunks.Remove(chunkId);
+                    _chunkMetadata.Remove(chunkId);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing clipboard chunk: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Process the reassembled clipboard data after all chunks are received
+        /// </summary>
+        private void ProcessReassembledClipboardData(ClipboardUpdateMessage message, PairedDevice device)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing reassembled clipboard data from {device.DeviceName}");
+
+                // Check if hardware ID matches if provided
+                if (!string.IsNullOrEmpty(message.HardwareId) && !string.IsNullOrEmpty(device.HardwareId) &&
+                    message.HardwareId != device.HardwareId)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Hardware ID mismatch: {message.HardwareId} vs {device.HardwareId}");
+                    return;
+                }
+
+                // Decrypt clipboard data
+                if (!string.IsNullOrEmpty(message.Data) && !string.IsNullOrEmpty(device.SharedKey))
+                {
+                    try
+                    {
+                        ClipboardData clipboardData;
+
+                        if (message.Format == "text/plain" && !message.IsBinary)
+                        {
+                            // Decrypt text
+                            var decryptedText = _encryptionService.DecryptText(message.Data, device.SharedKey);
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted reassembled text length: {decryptedText.Length}");
+                            clipboardData = ClipboardData.CreateText(decryptedText);
+                        }
+                        else if (message.Format == "image/png" && message.IsBinary)
+                        {
+                            // Decrypt binary data
+                            var encryptedBytes = Convert.FromBase64String(message.Data);
+                            var decryptedBytes = _encryptionService.DecryptData(encryptedBytes, Convert.FromBase64String(device.SharedKey));
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Decrypted reassembled binary length: {decryptedBytes.Length}");
+                            clipboardData = ClipboardData.CreateImage(decryptedBytes);
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported clipboard format: {message.Format}");
+                            return;
+                        }
+
+                        // Update device last seen
+                        _deviceManager.UpdateDeviceLastSeen(device.DeviceId);
+
+                        // Notify listeners
+                        ClipboardDataReceived?.Invoke(this, new ClipboardDataReceivedEventArgs(clipboardData, device));
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error decrypting reassembled clipboard data: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing reassembled clipboard data: {ex.Message}");
             }
         }
 
@@ -2690,6 +2942,8 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key update to device: {ex.Message}");
             }
         }
+
+
 
         /// <summary>
         /// Send key rotation update via relay server
