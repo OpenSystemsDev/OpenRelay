@@ -305,11 +305,31 @@ namespace OpenRelay.Services
                     }
                 }
 
-                // Parse the encrypted data
+                // Try first to decode the message from base64 if it looks like base64
+                bool isBase64 = e.EncryptedData.Length % 4 == 0 &&
+                                System.Text.RegularExpressions.Regex.IsMatch(e.EncryptedData, @"^[a-zA-Z0-9\+/]*={0,3}$");
+
+                string decodedContent = e.EncryptedData;
+                if (isBase64)
+                {
+                    try
+                    {
+                        byte[] decodedBytes = Convert.FromBase64String(e.EncryptedData);
+                        decodedContent = System.Text.Encoding.UTF8.GetString(decodedBytes);
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Successfully decoded base64 content: {decodedContent.Substring(0, Math.Min(100, decodedContent.Length))}...");
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to decode from base64: {ex.Message}");
+                        // Keep original content if decoding fails
+                    }
+                }
+
+                // Parse the message content (either original or decoded)
                 try
                 {
-                    // Try to parse as JSON first (for control messages)
-                    var message = JsonDocument.Parse(e.EncryptedData);
+                    // Try to parse as JSON
+                    var message = JsonDocument.Parse(decodedContent);
                     var root = message.RootElement;
 
                     if (root.TryGetProperty("type", out var typeProperty))
@@ -319,15 +339,14 @@ namespace OpenRelay.Services
                         // Process different message types
                         switch (messageType)
                         {
+                            case "PairingRequest":
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received PairingRequest via relay");
+                                ProcessRelayPairingRequest(root, e.SenderId, e.HardwareId);
+                                break;
+
                             case "PairingResponse":
                                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Received PairingResponse via relay");
                                 ProcessRelayPairingResponse(root, e.SenderId, e.HardwareId);
-                                break;
-
-                            case "PairingRequest":
-                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received PairingRequest via relay");
-                                // Add handling for incoming pairing requests via relay
-                                ProcessRelayPairingRequest(root, e.SenderId, e.HardwareId);
                                 break;
 
                             case "AuthRequest":
@@ -347,16 +366,16 @@ namespace OpenRelay.Services
                                 break;
 
                             default:
-                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown relay message type: {messageType}, Full message: {e.EncryptedData}");
+                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Unknown relay message type: {messageType}, Full message: {decodedContent.Substring(0, Math.Min(200, decodedContent.Length))}...");
                                 break;
                         }
                     }
                 }
-                catch (JsonException ex)
+                catch (JsonException jsonEx)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error parsing JSON from relay message: {ex.Message}");
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypted data preview: {e.EncryptedData.Substring(0, Math.Min(100, e.EncryptedData.Length))}...");
-                    // Not JSON, try to decrypt as clipboard data
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error parsing JSON from relay message: {jsonEx.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Content preview: {decodedContent.Substring(0, Math.Min(100, decodedContent.Length))}...");
+                    // Not JSON or invalid JSON, try to process as encrypted clipboard data
                     ProcessEncryptedClipboardData(e.SenderId, e.EncryptedData, e.HardwareId);
                 }
             }
@@ -366,6 +385,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Stack trace: {ex.StackTrace}");
             }
         }
+
 
         /// <summary>
         /// Process relay pairing response message
@@ -492,92 +512,158 @@ namespace OpenRelay.Services
         {
             try
             {
-                // Extract pairing request information
-                JsonElement payloadElement;
-                if (root.TryGetProperty("payload", out var payload))
+                // Extract device ID and device name directly from the message root
+                string deviceId = root.GetProperty("sender_id").GetString() ?? string.Empty;
+                string deviceName = root.GetProperty("sender_name").GetString() ?? string.Empty;
+
+                // Try to get request_id, public_key, challenge from the payload if present, otherwise from the root
+                string requestId = string.Empty;
+                string challenge = string.Empty;
+                string publicKey = string.Empty;
+
+                if (root.TryGetProperty("payload", out var payloadElement))
                 {
-                    payloadElement = payload;
-                }
-                else
-                {
-                    payloadElement = root;
-                }
+                    // Extract from payload structure
+                    requestId = payloadElement.TryGetProperty("request_id", out var reqIdElement) ?
+                        reqIdElement.GetString() ?? string.Empty : string.Empty;
 
-                string deviceId = payloadElement.TryGetProperty("device_id", out var deviceIdElement)
-                    ? deviceIdElement.GetString() ?? string.Empty
-                    : string.Empty;
+                    challenge = payloadElement.TryGetProperty("challenge", out var challengeElement) ?
+                        challengeElement.GetString() ?? string.Empty : string.Empty;
 
-                string deviceName = payloadElement.TryGetProperty("device_name", out var deviceNameElement)
-                    ? deviceNameElement.GetString() ?? string.Empty
-                    : "Unknown Device";
+                    publicKey = payloadElement.TryGetProperty("public_key", out var publicKeyElement) ?
+                        publicKeyElement.GetString() ?? string.Empty : string.Empty;
 
-                string requestId = payloadElement.TryGetProperty("request_id", out var requestIdElement)
-                    ? requestIdElement.GetString() ?? string.Empty
-                    : string.Empty;
+                    // Try to get platform from payload
+                    string platform = payloadElement.TryGetProperty("platform", out var platformElement) ?
+                        platformElement.GetString() ?? "Unknown" : "Unknown";
 
-                string challenge = payloadElement.TryGetProperty("challenge", out var challengeElement)
-                    ? challengeElement.GetString() ?? string.Empty
-                    : string.Empty;
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}) via relay");
 
-                string publicKey = payloadElement.TryGetProperty("public_key", out var publicKeyElement)
-                    ? publicKeyElement.GetString() ?? string.Empty
-                    : string.Empty;
+                    // Forward to the DeviceManager to handle the pairing request
+                    bool accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", 0,
+                        platform, hardwareId, challenge, publicKey);
 
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}) via relay");
-
-                // Forward to the DeviceManager to handle the pairing request
-                bool accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", 0,
-                    payloadElement.TryGetProperty("platform", out var platformElement) ? platformElement.GetString() ?? "Unknown" : "Unknown",
-                    hardwareId, challenge, publicKey);
-
-                // Send response back via relay
-                if (_relayConnection != null)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing response: accepted={accepted}");
-
-                    // If accepted, create a device and include the shared key
-                    if (accepted)
+                    // Send response back via relay
+                    if (_relayConnection != null)
                     {
-                        var device = _deviceManager.GetDeviceById(deviceId);
-                        if (device != null)
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing response: accepted={accepted}");
+
+                        // If accepted, create a device and include the shared key
+                        if (accepted)
                         {
+                            var device = _deviceManager.GetDeviceById(deviceId);
+                            if (device != null)
+                            {
+                                var response = new PairingResponseMessage
+                                {
+                                    DeviceId = _deviceManager.LocalDeviceId,
+                                    DeviceName = _deviceManager.LocalDeviceName,
+                                    RequestId = requestId,
+                                    Accepted = true,
+                                    HardwareId = _deviceManager.LocalHardwareId,
+                                    EncryptedSharedKey = device.SharedKey
+                                };
+
+                                // Add challenge/response if we have them
+                                if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
+                                {
+                                    string challengeResponse = _deviceManager.SignChallenge(challenge);
+                                    string newChallenge = _deviceManager.GenerateChallenge();
+
+                                    response.ChallengeResponse = challengeResponse;
+                                    response.Challenge = newChallenge;
+                                    response.PublicKey = _deviceManager.GetPublicKey();
+                                }
+
+                                await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
+                            }
+                        }
+                        else
+                        {
+                            // Send rejected response
                             var response = new PairingResponseMessage
                             {
                                 DeviceId = _deviceManager.LocalDeviceId,
                                 DeviceName = _deviceManager.LocalDeviceName,
                                 RequestId = requestId,
-                                Accepted = true,
-                                HardwareId = _deviceManager.LocalHardwareId,
-                                EncryptedSharedKey = device.SharedKey
+                                Accepted = false,
+                                HardwareId = _deviceManager.LocalHardwareId
                             };
-
-                            // Add challenge/response if we have them
-                            if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
-                            {
-                                string challengeResponse = _deviceManager.SignChallenge(challenge);
-                                string newChallenge = _deviceManager.GenerateChallenge();
-
-                                response.ChallengeResponse = challengeResponse;
-                                response.Challenge = newChallenge;
-                                response.PublicKey = _deviceManager.GetPublicKey();
-                            }
 
                             await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
                         }
                     }
-                    else
-                    {
-                        // Send rejected response
-                        var response = new PairingResponseMessage
-                        {
-                            DeviceId = _deviceManager.LocalDeviceId,
-                            DeviceName = _deviceManager.LocalDeviceName,
-                            RequestId = requestId,
-                            Accepted = false,
-                            HardwareId = _deviceManager.LocalHardwareId
-                        };
+                }
+                else
+                {
+                    // Try to get values directly from root as fallback
+                    requestId = root.TryGetProperty("request_id", out var rootReqIdElement) ?
+                        rootReqIdElement.GetString() ?? string.Empty : string.Empty;
 
-                        await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
+                    challenge = root.TryGetProperty("challenge", out var rootChallengeElement) ?
+                        rootChallengeElement.GetString() ?? string.Empty : string.Empty;
+
+                    publicKey = root.TryGetProperty("public_key", out var rootPublicKeyElement) ?
+                        rootPublicKeyElement.GetString() ?? string.Empty : string.Empty;
+
+                    string platform = root.TryGetProperty("platform", out var rootPlatformElement) ?
+                        rootPlatformElement.GetString() ?? "Unknown" : "Unknown";
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request (direct format) from {deviceName} ({deviceId}) via relay");
+
+                    // Forward to the DeviceManager to handle the pairing request
+                    bool accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", 0,
+                        platform, hardwareId, challenge, publicKey);
+
+                    // Send response back via relay
+                    if (_relayConnection != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing response: accepted={accepted}");
+
+                        // If accepted, create a device and include the shared key
+                        if (accepted)
+                        {
+                            var device = _deviceManager.GetDeviceById(deviceId);
+                            if (device != null)
+                            {
+                                var response = new PairingResponseMessage
+                                {
+                                    DeviceId = _deviceManager.LocalDeviceId,
+                                    DeviceName = _deviceManager.LocalDeviceName,
+                                    RequestId = requestId,
+                                    Accepted = true,
+                                    HardwareId = _deviceManager.LocalHardwareId,
+                                    EncryptedSharedKey = device.SharedKey
+                                };
+
+                                // Add challenge/response if we have them
+                                if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
+                                {
+                                    string challengeResponse = _deviceManager.SignChallenge(challenge);
+                                    string newChallenge = _deviceManager.GenerateChallenge();
+
+                                    response.ChallengeResponse = challengeResponse;
+                                    response.Challenge = newChallenge;
+                                    response.PublicKey = _deviceManager.GetPublicKey();
+                                }
+
+                                await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
+                            }
+                        }
+                        else
+                        {
+                            // Send rejected response
+                            var response = new PairingResponseMessage
+                            {
+                                DeviceId = _deviceManager.LocalDeviceId,
+                                DeviceName = _deviceManager.LocalDeviceName,
+                                RequestId = requestId,
+                                Accepted = false,
+                                HardwareId = _deviceManager.LocalHardwareId
+                            };
+
+                            await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
+                        }
                     }
                 }
             }
@@ -587,6 +673,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Stack trace: {ex.StackTrace}");
             }
         }
+
 
         /// <summary>
         /// Process authentication request message
