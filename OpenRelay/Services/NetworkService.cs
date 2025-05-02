@@ -60,7 +60,7 @@ namespace OpenRelay.Services
         private readonly Dictionary<string, TaskCompletionSource<bool>> _pairingRequests = new Dictionary<string, TaskCompletionSource<bool>>();
 
         // Relay server connection
-        private RelayConnection? _relayConnection;
+        internal RelayConnection? _relayConnection;
         private bool _isConnectedToRelayServer = false;
 
         /// <summary>

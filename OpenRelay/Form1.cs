@@ -79,6 +79,9 @@ namespace OpenRelay
                 // Update status
                 UpdateStatus("Connected");
                 UpdateRelayStatus(false);
+
+                // Connect to relay server if enabled in settings
+                Task.Run(async () => await ConnectToRelayIfEnabledAsync());
             }
             catch (Exception ex)
             {
@@ -115,6 +118,29 @@ namespace OpenRelay
             trayIcon.Visible = true;
 
             trayIcon.DoubleClick += TrayIcon_DoubleClick;
+        }
+
+        private async Task ConnectToRelayIfEnabledAsync()
+        {
+            try
+            {
+                // Get current settings
+                var settings = _settingsManager.GetSettings();
+
+                // If relay server is enabled, connect to it
+                if (settings.UseRelayServer)
+                {
+                    System.Diagnostics.Debug.WriteLine("[APP] Auto-connecting to relay server at startup");
+                    await _networkService.ConnectToRelayServerAsync();
+
+                    // Update status in UI
+                    UpdateRelayStatus(_networkService.IsConnectedToRelayServer);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[APP] Error connecting to relay server at startup: {ex.Message}");
+            }
         }
 
         private async Task StartNetworkServiceAsync()
@@ -361,7 +387,7 @@ namespace OpenRelay
             }
 
             // Show relay ID input dialog
-            using (var dialog = new TextInputDialog("Add Device (Relay)", "Enter the Hardware ID of the device to pair with:"))
+            using (var dialog = new TextInputDialog("Add Device (Relay)", "Enter the Relay Device ID of the device to pair with:"))
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
@@ -387,8 +413,8 @@ namespace OpenRelay
 
         private void SettingsItem_Click(object? sender, EventArgs e)
         {
-            // Show settings dialog
-            using (var dialog = new SettingsDialog(_settingsManager))
+            // Show settings dialog with network service passed in
+            using (var dialog = new SettingsDialog(_settingsManager, _networkService))
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
