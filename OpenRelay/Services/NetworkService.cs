@@ -2541,11 +2541,14 @@ namespace OpenRelay.Services
                 // Encrypt the data
                 string encryptedData;
                 bool isBinary = false;
+                // Determine the proper content type for the relay server
+                string contentType = "Text"; // Default to Text
 
                 if (data.Format == "text/plain" && data.TextData != null)
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text for relay: {data.TextData.Length} chars");
                     encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
+                    contentType = "Text"; // Server expected value
                 }
                 else if (data.Format == "image/png" && data.BinaryData != null)
                 {
@@ -2553,6 +2556,7 @@ namespace OpenRelay.Services
                     var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
                     encryptedData = Convert.ToBase64String(encryptedBytes);
                     isBinary = true;
+                    contentType = "Image"; // Server expected value
                 }
                 else
                 {
@@ -2592,11 +2596,11 @@ namespace OpenRelay.Services
                     // Serialize message
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending clipboard data as single message ({messageBytes.Length} bytes)");
 
-                    // Send via relay server
+                    // Send via relay server - IMPORTANT: Using proper content type mapping
                     await _relayConnection.SendEncryptedDataAsync(
                         device.RelayDeviceId,
                         Convert.ToBase64String(messageBytes),
-                        "ClipboardUpdate",
+                        contentType, // Updated to proper content type expected by server
                         cancellationToken);
                 }
 
@@ -2654,6 +2658,9 @@ namespace OpenRelay.Services
 
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending chunk {i + 1}/{chunks.Count}, size: {chunks[i].Length} chars");
 
+                    // Determine proper content type
+                    string contentType = message.IsBinary ? "Image" : "Text";
+
                     await _relayConnection.SendMessageAsync(
                         recipientId,
                         "ClipboardChunk",
@@ -2675,6 +2682,7 @@ namespace OpenRelay.Services
                 throw;
             }
         }
+
 
         /// <summary>
         /// Process a received clipboard chunk
