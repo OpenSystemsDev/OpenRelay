@@ -715,6 +715,14 @@ namespace OpenRelay.Services
                             var device = _deviceManager.GetDeviceById(deviceId);
                             if (device != null)
                             {
+                                // Fix: On the receiving end of the pairing request, the device was not marking the device as a relay device, thus was trying to send
+                                // clipboard updates via LAN
+                                // So now we explicitly set it
+                                device.IsRelayPaired = true;
+                                device.RelayDeviceId = senderId;
+                                device.IpAddress = "relay";
+                                _deviceManager.UpdateDevice(device);
+
                                 var response = new PairingResponseMessage
                                 {
                                     DeviceId = _deviceManager.LocalDeviceId,
