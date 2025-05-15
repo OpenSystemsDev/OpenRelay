@@ -25,7 +25,7 @@ namespace OpenRelay.UI
         {
             // Form settings
             this.Text = "Manage Paired Devices";
-            this.Size = new Size(600, 400);
+            this.Size = new System.Drawing.Size(600, 400);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.MinimizeBox = false;
             this.MaximizeBox = false;
@@ -108,10 +108,10 @@ namespace OpenRelay.UI
                 var item = new ListViewItem(device.DeviceName);
 
                 // Add connection type
-                item.SubItems.Add(device.IsRelayPaired ? "Relay" : "Local");
+                item.SubItems.Add(device.ConnectionType.ToString());
 
-                // Add address/ID
-                if (device.IsRelayPaired)
+                // Add address/ID based on connection type
+                if (device.ConnectionType == ConnectionType.Relay)
                 {
                     item.SubItems.Add(device.RelayDeviceId);
                 }

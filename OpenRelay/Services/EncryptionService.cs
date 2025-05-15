@@ -17,7 +17,7 @@ namespace OpenRelay.Services
 
         private uint _currentKeyId = 1;  // Start with key ID 1
         private DateTime _lastKeyRotation;
-        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromSeconds( 7 * 24 * 60 * 60); // 7 days
+        private readonly TimeSpan _keyRotationInterval = TimeSpan.FromSeconds(7 * 24 * 60 * 60); // 7 days
 
      
         private readonly Dictionary<uint, string> _encryptionKeys = new Dictionary<uint, string>();

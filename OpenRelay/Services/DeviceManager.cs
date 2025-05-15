@@ -693,6 +693,8 @@ namespace OpenRelay.Services
                 existingDevice.HardwareId = device.HardwareId;
                 existingDevice.PublicKey = device.PublicKey;
                 existingDevice.IsAuthenticated = device.IsAuthenticated;
+                existingDevice.ConnectionType = device.ConnectionType;
+                existingDevice.RelayDeviceId = device.RelayDeviceId;
 
                 // Notify listeners
                 DeviceUpdated?.Invoke(this, new DeviceEventArgs(existingDevice));
@@ -815,6 +817,9 @@ namespace OpenRelay.Services
             // If accepted, generate a key and add the device
             if (args.Accepted)
             {
+                // Determine connection type based on IP address
+                ConnectionType connectionType = ipAddress == "relay" ? ConnectionType.Relay : ConnectionType.Local;
+
                 var device = new PairedDevice
                 {
                     DeviceId = deviceId,
@@ -827,7 +832,10 @@ namespace OpenRelay.Services
                     LastSeen = DateTime.Now,
                     HardwareId = hardwareId,
                     PublicKey = publicKey,
-                    IsAuthenticated = false // Will be set to true after challenge-response
+                    IsAuthenticated = false, // Will be set to true after challenge-response
+                    ConnectionType = connectionType,
+                    // Set RelayDeviceId if it's a relay connection
+                    RelayDeviceId = connectionType == ConnectionType.Relay ? deviceId : string.Empty
                 };
 
                 AddOrUpdateDevice(device);

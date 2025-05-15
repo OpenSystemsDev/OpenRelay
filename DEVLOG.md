@@ -10,7 +10,6 @@ Note: Older updates are not included in this log, as they were not documented. T
 
 ## 2025-04-29
 
-**Time:** 16:27:05 UTC | **Author:** Awe03
 Today marks the completion of the cross-network functionality for OpenRelay.
 
 ### Goal  
@@ -30,3 +29,12 @@ Removed `_webSocket.Options.SetRequestHeader()` This was overriding the clients 
 ### Lessons Learned  
 - If the code works, do NOT touch it, even for optimization.
 ---
+
+## 2025-05-02 to 2025-05-16
+
+## Goal
+Remove debugging logic from the server, and unify the Relay and Local pairing logic
+As of now, Local pairing and Relay pairing have separate logics (relay uses the challenge based authentication, and local just sends a pairing request), and they are handled by deparate functions, complicating the codebase.
+
+*   **Added:**  Unified pairing logic for both Local and Relay connections, and processes are managed by the same functions, with switch / if for connection type specific handling.
+*   **Issue:**  There is a lot of code simplified for debugging purposes on the client. One instance is that since previously we were experiencing issues with the client saving the wrong device IDs thus rejecting messages from legitimate users, and so temporarily, instead of rejecting the message, we updated the Device ID to match the sender. This is a severe vunerability since now anyone claiming to be a device can send messages to the client, and the client will accept and also update ownership.

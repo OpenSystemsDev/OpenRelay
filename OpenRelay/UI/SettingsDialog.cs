@@ -17,7 +17,7 @@ namespace OpenRelay.UI
         private Button _saveButton;
         private Button _cancelButton;
 
-        // New controls for device ID
+        // Device ID controls
         private Label _deviceIdLabel;
         private TextBox _deviceIdTextBox;
         private Button _copyDeviceIdButton;
@@ -37,7 +37,7 @@ namespace OpenRelay.UI
         {
             // Form settings
             this.Text = "OpenRelay Settings";
-            this.Size = new Size(500, 300); // Increased height for new controls
+            this.Size = new System.Drawing.Size(500, 300);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.MinimizeBox = false;
             this.MaximizeBox = false;
@@ -48,7 +48,7 @@ namespace OpenRelay.UI
             var mainLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                RowCount = 7, // Increased row count for new controls
+                RowCount = 7,
                 ColumnCount = 2,
                 Padding = new Padding(20)
             };
@@ -57,8 +57,8 @@ namespace OpenRelay.UI
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40)); // Device ID label
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40)); // Device ID controls
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
 

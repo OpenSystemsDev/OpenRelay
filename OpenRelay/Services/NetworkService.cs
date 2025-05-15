@@ -269,7 +269,7 @@ namespace OpenRelay.Services
             // Update status for paired devices that use relay
             foreach (var device in _deviceManager.GetPairedDevices())
             {
-                if (device.IsRelayPaired)
+                if (device.ConnectionType == ConnectionType.Relay)
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Updating relay status for device: {device.DeviceName}");
 
@@ -595,7 +595,6 @@ namespace OpenRelay.Services
                                 CurrentKeyId = _encryptionService.GetCurrentKeyId(),
                                 LastSeen = DateTime.Now,
                                 HardwareId = responseHardwareId,
-                                IsRelayPaired = true,
                                 RelayDeviceId = senderId
                             };
 
@@ -669,178 +668,10 @@ namespace OpenRelay.Services
         /// <summary>
         /// Process relay pairing request message
         /// </summary>
-        async private void ProcessRelayPairingRequest(JsonElement root, string senderId, string hardwareId)
+        private async void ProcessRelayPairingRequest(JsonElement root, string senderId, string hardwareId)
         {
-            try
-            {
-                // Extract device ID and device name directly from the message root
-                string deviceId = root.GetProperty("sender_id").GetString() ?? string.Empty;
-                string deviceName = root.GetProperty("sender_name").GetString() ?? string.Empty;
-
-                // Try to get request_id, public_key, challenge from the payload if present, otherwise from the root
-                string requestId = string.Empty;
-                string challenge = string.Empty;
-                string publicKey = string.Empty;
-
-                if (root.TryGetProperty("payload", out var payloadElement))
-                {
-                    // Extract from payload structure
-                    requestId = payloadElement.TryGetProperty("request_id", out var reqIdElement) ?
-                        reqIdElement.GetString() ?? string.Empty : string.Empty;
-
-                    challenge = payloadElement.TryGetProperty("challenge", out var challengeElement) ?
-                        challengeElement.GetString() ?? string.Empty : string.Empty;
-
-                    publicKey = payloadElement.TryGetProperty("public_key", out var publicKeyElement) ?
-                        publicKeyElement.GetString() ?? string.Empty : string.Empty;
-
-                    // Try to get platform from payload
-                    string platform = payloadElement.TryGetProperty("platform", out var platformElement) ?
-                        platformElement.GetString() ?? "Unknown" : "Unknown";
-
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}) via relay");
-
-                    // Forward to the DeviceManager to handle the pairing request
-                    bool accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", 0,
-                        platform, hardwareId, challenge, publicKey);
-
-                    // Send response back via relay
-                    if (_relayConnection != null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing response: accepted={accepted}");
-
-                        // If accepted, create a device and include the shared key
-                        if (accepted)
-                        {
-                            var device = _deviceManager.GetDeviceById(deviceId);
-                            if (device != null)
-                            {
-                                // Fix: On the receiving end of the pairing request, the device was not marking the device as a relay device, thus was trying to send
-                                // clipboard updates via LAN
-                                // So now we explicitly set it
-                                device.IsRelayPaired = true;
-                                device.RelayDeviceId = senderId;
-                                device.IpAddress = "relay";
-                                _deviceManager.UpdateDevice(device);
-
-                                var response = new PairingResponseMessage
-                                {
-                                    DeviceId = _deviceManager.LocalDeviceId,
-                                    DeviceName = _deviceManager.LocalDeviceName,
-                                    RequestId = requestId,
-                                    Accepted = true,
-                                    HardwareId = _deviceManager.LocalHardwareId,
-                                    EncryptedSharedKey = device.SharedKey
-                                };
-
-                                // Add challenge/response if we have them
-                                if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
-                                {
-                                    string challengeResponse = _deviceManager.SignChallenge(challenge);
-                                    string newChallenge = _deviceManager.GenerateChallenge();
-
-                                    response.ChallengeResponse = challengeResponse;
-                                    response.Challenge = newChallenge;
-                                    response.PublicKey = _deviceManager.GetPublicKey();
-                                }
-
-                                await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
-                            }
-                        }
-                        else
-                        {
-                            // Send rejected response
-                            var response = new PairingResponseMessage
-                            {
-                                DeviceId = _deviceManager.LocalDeviceId,
-                                DeviceName = _deviceManager.LocalDeviceName,
-                                RequestId = requestId,
-                                Accepted = false,
-                                HardwareId = _deviceManager.LocalHardwareId
-                            };
-
-                            await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
-                        }
-                    }
-                }
-                else
-                {
-                    // Try to get values directly from root as fallback
-                    requestId = root.TryGetProperty("request_id", out var rootReqIdElement) ?
-                        rootReqIdElement.GetString() ?? string.Empty : string.Empty;
-
-                    challenge = root.TryGetProperty("challenge", out var rootChallengeElement) ?
-                        rootChallengeElement.GetString() ?? string.Empty : string.Empty;
-
-                    publicKey = root.TryGetProperty("public_key", out var rootPublicKeyElement) ?
-                        rootPublicKeyElement.GetString() ?? string.Empty : string.Empty;
-
-                    string platform = root.TryGetProperty("platform", out var rootPlatformElement) ?
-                        rootPlatformElement.GetString() ?? "Unknown" : "Unknown";
-
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request (direct format) from {deviceName} ({deviceId}) via relay");
-
-                    // Forward to the DeviceManager to handle the pairing request
-                    bool accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, "relay", 0,
-                        platform, hardwareId, challenge, publicKey);
-
-                    // Send response back via relay
-                    if (_relayConnection != null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing response: accepted={accepted}");
-
-                        // If accepted, create a device and include the shared key
-                        if (accepted)
-                        {
-                            var device = _deviceManager.GetDeviceById(deviceId);
-                            if (device != null)
-                            {
-                                var response = new PairingResponseMessage
-                                {
-                                    DeviceId = _deviceManager.LocalDeviceId,
-                                    DeviceName = _deviceManager.LocalDeviceName,
-                                    RequestId = requestId,
-                                    Accepted = true,
-                                    HardwareId = _deviceManager.LocalHardwareId,
-                                    EncryptedSharedKey = device.SharedKey
-                                };
-
-                                // Add challenge/response if we have them
-                                if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
-                                {
-                                    string challengeResponse = _deviceManager.SignChallenge(challenge);
-                                    string newChallenge = _deviceManager.GenerateChallenge();
-
-                                    response.ChallengeResponse = challengeResponse;
-                                    response.Challenge = newChallenge;
-                                    response.PublicKey = _deviceManager.GetPublicKey();
-                                }
-
-                                await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
-                            }
-                        }
-                        else
-                        {
-                            // Send rejected response
-                            var response = new PairingResponseMessage
-                            {
-                                DeviceId = _deviceManager.LocalDeviceId,
-                                DeviceName = _deviceManager.LocalDeviceName,
-                                RequestId = requestId,
-                                Accepted = false,
-                                HardwareId = _deviceManager.LocalHardwareId
-                            };
-
-                            await _relayConnection.SendMessageAsync(senderId, "PairingResponse", response, CancellationToken.None);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing relay pairing request: {ex.Message}");
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Stack trace: {ex.StackTrace}");
-            }
+            // Process using the unified method for relay connections
+            await ProcessPairingRequestAsync(null, root, string.Empty, hardwareId, ConnectionType.Relay, CancellationToken.None);
         }
 
 
@@ -1424,7 +1255,8 @@ namespace OpenRelay.Services
                                                 break;
 
                                             case MessageType.PairingResponse:
-                                                await HandlePairingResponseAsync(root, hardwareId, cancellationToken);
+                                                // Add ConnectionType parameter (Local for direct WebSocket connections)
+                                                await HandlePairingResponseAsync(root, hardwareId, ConnectionType.Local, cancellationToken);
                                                 break;
 
                                             case MessageType.Auth:
@@ -1563,175 +1395,387 @@ namespace OpenRelay.Services
         /// </summary>
         private async Task HandlePairingRequestAsync(WebSocket webSocket, JsonElement root, string ipAddress, string? hardwareId, CancellationToken cancellationToken)
         {
-            // Extract request information
-            var deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
-            var deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
-            var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
+            // Process using the unified method for local connections
+            await ProcessPairingRequestAsync(webSocket, root, ipAddress, hardwareId, ConnectionType.Local, cancellationToken);
+        }
 
-            // Extract challenge and public key if available
-            string challenge = string.Empty;
-            string publicKey = string.Empty;
-
-            if (root.TryGetProperty("challenge", out var challengeProperty))
+        /// <summary>
+        /// Process pairing request from another device (unified method for both connection types)
+        /// </summary>
+        private async Task ProcessPairingRequestAsync(WebSocket? webSocket, JsonElement root, string ipAddress, string? hardwareId, ConnectionType connectionType, CancellationToken cancellationToken)
+        {
+            try
             {
-                challenge = challengeProperty.GetString() ?? string.Empty;
-            }
+                // Extract request information (account for different formats based on connection type)
+                string deviceId;
+                string deviceName;
+                string requestId;
+                string challenge = string.Empty;
+                string publicKey = string.Empty;
+                string platform = "Windows";
 
-            if (root.TryGetProperty("public_key", out var publicKeyProperty))
-            {
-                publicKey = publicKeyProperty.GetString() ?? string.Empty;
-            }
-
-            // Extract platform if possible
-            string platform = "Windows";
-            if (root.TryGetProperty("platform", out var platformElement))
-            {
-                platform = platformElement.GetString() ?? "Windows";
-            }
-
-            // Get hardware ID from message or parameter
-            if (string.IsNullOrEmpty(hardwareId) && root.TryGetProperty("hardware_id", out var hwIdElement))
-            {
-                hardwareId = hwIdElement.GetString() ?? string.Empty;
-            }
-
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}), platform: {platform}, HW ID: {hardwareId}");
-
-            // Handle the pairing request
-            var accepted = _deviceManager.HandlePairingRequest(deviceId, deviceName, ipAddress, DEFAULT_PORT, platform, hardwareId, challenge, publicKey);
-
-            // Generate our challenge for authentication
-            string ourChallenge = !string.IsNullOrEmpty(challenge) ? _deviceManager.GenerateChallenge() : string.Empty;
-
-            // If device accepted, sign their challenge
-            string challengeResponse = string.Empty;
-            if (accepted && !string.IsNullOrEmpty(challenge))
-            {
-                challengeResponse = _deviceManager.SignChallenge(challenge);
-            }
-
-            // Send response
-            var response = new PairingResponseMessage
-            {
-                DeviceId = _deviceManager.LocalDeviceId,
-                DeviceName = _deviceManager.LocalDeviceName,
-                RequestId = requestId,
-                Accepted = accepted,
-                HardwareId = _deviceManager.LocalHardwareId
-            };
-
-            // If accepted, include the shared key
-            if (accepted)
-            {
-                var device = _deviceManager.GetDeviceById(deviceId);
-                if (device != null)
+                // Extract information based on connection type
+                if (connectionType == ConnectionType.Relay && root.TryGetProperty("payload", out var payload))
                 {
-                    response.EncryptedSharedKey = device.SharedKey;
+                    // Relay format with nested payload
+                    deviceId = root.GetProperty("sender_id").GetString() ?? string.Empty;
+                    deviceName = root.GetProperty("sender_name").GetString() ?? string.Empty;
 
-                    // Add challenge/response if we have them
-                    if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(challengeResponse))
+                    requestId = payload.TryGetProperty("request_id", out var reqIdElement) ?
+                        reqIdElement.GetString() ?? string.Empty : string.Empty;
+
+                    if (string.IsNullOrEmpty(requestId) && root.TryGetProperty("request_id", out var rootReqIdElement))
                     {
-                        response.ChallengeResponse = challengeResponse;
-                        response.Challenge = ourChallenge;
-                        response.PublicKey = _deviceManager.GetPublicKey();
+                        requestId = rootReqIdElement.GetString() ?? string.Empty;
+                    }
+
+                    challenge = payload.TryGetProperty("challenge", out var challengeElement) ?
+                        challengeElement.GetString() ?? string.Empty : string.Empty;
+
+                    if (string.IsNullOrEmpty(challenge) && root.TryGetProperty("challenge", out var rootChallengeElement))
+                    {
+                        challenge = rootChallengeElement.GetString() ?? string.Empty;
+                    }
+
+                    publicKey = payload.TryGetProperty("public_key", out var publicKeyElement) ?
+                        publicKeyElement.GetString() ?? string.Empty : string.Empty;
+
+                    if (string.IsNullOrEmpty(publicKey) && root.TryGetProperty("public_key", out var rootPublicKeyElement))
+                    {
+                        publicKey = rootPublicKeyElement.GetString() ?? string.Empty;
+                    }
+
+                    platform = payload.TryGetProperty("platform", out var platformElement) ?
+                        platformElement.GetString() ?? "Windows" : "Windows";
+                }
+                else
+                {
+                    // Local/direct format
+                    deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
+                    deviceName = root.GetProperty("device_name").GetString() ?? string.Empty;
+                    requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
+
+                    if (root.TryGetProperty("challenge", out var challengeProperty))
+                    {
+                        challenge = challengeProperty.GetString() ?? string.Empty;
+                    }
+
+                    if (root.TryGetProperty("public_key", out var publicKeyProperty))
+                    {
+                        publicKey = publicKeyProperty.GetString() ?? string.Empty;
+                    }
+
+                    if (root.TryGetProperty("platform", out var platformElement))
+                    {
+                        platform = platformElement.GetString() ?? "Windows";
                     }
                 }
-            }
 
-            await SendMessageAsync(webSocket, response, cancellationToken);
+                // Get hardware ID from message if not provided
+                if (string.IsNullOrEmpty(hardwareId) && root.TryGetProperty("hardware_id", out var hwIdElement))
+                {
+                    hardwareId = hwIdElement.GetString() ?? string.Empty;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing request from {deviceName} ({deviceId}) via {connectionType}");
+
+                // Determine the appropriate address based on connection type
+                string deviceAddress = connectionType == ConnectionType.Relay ? "relay" : ipAddress;
+                int devicePort = connectionType == ConnectionType.Relay ? 0 : DEFAULT_PORT;
+
+                // Forward to DeviceManager to handle the pairing logic
+                bool accepted = _deviceManager.HandlePairingRequest(
+                    deviceId, deviceName, deviceAddress, devicePort, platform, hardwareId, challenge, publicKey);
+
+                // Generate our challenge for authentication if accepted
+                string ourChallenge = !string.IsNullOrEmpty(challenge) ? _deviceManager.GenerateChallenge() : string.Empty;
+
+                // If accepted and challenge provided, sign their challenge
+                string challengeResponse = string.Empty;
+                if (accepted && !string.IsNullOrEmpty(challenge))
+                {
+                    challengeResponse = _deviceManager.SignChallenge(challenge);
+                }
+
+                // Create response message
+                var response = new PairingResponseMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    RequestId = requestId,
+                    Accepted = accepted,
+                    HardwareId = _deviceManager.LocalHardwareId
+                };
+
+                // If accepted, include the shared key
+                if (accepted)
+                {
+                    var device = _deviceManager.GetDeviceById(deviceId);
+                    if (device != null)
+                    {
+                        // Update device connection type
+                        device.ConnectionType = connectionType;
+
+                        if (connectionType == ConnectionType.Relay)
+                        {
+                            // For relay devices
+                            device.RelayDeviceId = deviceId;
+                            device.IpAddress = "relay";
+                        }
+
+                        _deviceManager.UpdateDevice(device);
+
+                        response.EncryptedSharedKey = device.SharedKey;
+
+                        // Add challenge/response if we have them
+                        if (!string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(challengeResponse))
+                        {
+                            response.ChallengeResponse = challengeResponse;
+                            response.Challenge = ourChallenge;
+                            response.PublicKey = _deviceManager.GetPublicKey();
+                        }
+                    }
+                }
+
+                // Send response based on connection type
+                if (connectionType == ConnectionType.Relay)
+                {
+                    if (_relayConnection != null)
+                    {
+                        await _relayConnection.SendMessageAsync(deviceId, "PairingResponse", response, cancellationToken);
+                    }
+                }
+                else if (webSocket != null)
+                {
+                    await SendMessageAsync(webSocket, response, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error handling pairing request: {ex.Message}");
+            }
         }
 
         /// <summary>
         /// Handle a pairing response
         /// </summary>
-        private async Task HandlePairingResponseAsync(JsonElement root, string? hardwareId, CancellationToken cancellationToken)
+        private async Task HandlePairingResponseAsync(JsonElement root, string? hardwareId, ConnectionType connectionType, CancellationToken cancellationToken)
         {
-            // Extract response information
-            var requestId = root.GetProperty("request_id").GetString() ?? string.Empty;
-            var accepted = root.GetProperty("accepted").GetBoolean();
-
-            System.Diagnostics.Debug.WriteLine($"[NETWORK] Received pairing response for request {requestId}: {accepted}");
-
-            // Get hardware ID from message or parameter
-            if (string.IsNullOrEmpty(hardwareId) && root.TryGetProperty("hardware_id", out var hwIdElement))
+            try
             {
-                hardwareId = hwIdElement.GetString() ?? string.Empty;
-            }
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing pairing response via {connectionType}: {JsonSerializer.Serialize(root)}");
 
-            // If we have a pending request for this ID, complete it
-            if (_pairingRequests.TryGetValue(requestId, out var tcs))
-            {
-                // If accepted, get the device info and shared key
-                if (accepted &&
-                    root.TryGetProperty("device_id", out var deviceIdElement) &&
-                    root.TryGetProperty("device_name", out var deviceNameElement) &&
-                    root.TryGetProperty("encrypted_shared_key", out var sharedKeyElement))
+                // Extract request ID and acceptance status (similar for both connection types)
+                string requestId = string.Empty;
+                bool accepted = false;
+
+                // Handle slightly different message formats between local and relay
+                if (connectionType == ConnectionType.Relay && root.TryGetProperty("payload", out var payload))
                 {
-                    var deviceId = deviceIdElement.GetString() ?? string.Empty;
-                    var deviceName = deviceNameElement.GetString() ?? string.Empty;
-                    var sharedKey = sharedKeyElement.GetString() ?? string.Empty;
+                    // Relay format with nested payload
+                    requestId = payload.TryGetProperty("request_id", out var reqIdElement) ?
+                        reqIdElement.GetString() ?? string.Empty : string.Empty;
 
-                    // Create and add the device
-                    var device = new PairedDevice
+                    if (string.IsNullOrEmpty(requestId) && root.TryGetProperty("request_id", out var rootReqIdElement))
                     {
-                        DeviceId = deviceId,
-                        DeviceName = deviceName,
-                        IpAddress = root.TryGetProperty("ip_address", out var ipElement) ? ipElement.GetString() ?? string.Empty : string.Empty,
-                        Port = root.TryGetProperty("port", out var portElement) ? portElement.GetInt32() : DEFAULT_PORT,
-                        Platform = "Unknown",
-                        SharedKey = sharedKey,
-                        CurrentKeyId = _encryptionService.GetCurrentKeyId(), // Use our current key ID
-                        LastSeen = DateTime.Now,
-                        HardwareId = hardwareId ?? string.Empty
-                    };
+                        requestId = rootReqIdElement.GetString() ?? string.Empty;
+                    }
 
-                    // Check for challenge-response data
-                    if (root.TryGetProperty("challenge_response", out var responseElement) &&
-                        root.TryGetProperty("challenge", out var challengeElement) &&
-                        root.TryGetProperty("public_key", out var keyElement))
+                    accepted = payload.TryGetProperty("accepted", out var acceptedElement) ?
+                        acceptedElement.GetBoolean() : false;
+
+                    if (!accepted && root.TryGetProperty("accepted", out var rootAcceptedElement))
                     {
-                        string challengeResponse = responseElement.GetString() ?? string.Empty;
-                        string challenge = challengeElement.GetString() ?? string.Empty;
-                        string publicKey = keyElement.GetString() ?? string.Empty;
+                        accepted = rootAcceptedElement.GetBoolean();
+                    }
+                }
+                else
+                {
+                    // Local/direct format
+                    requestId = root.TryGetProperty("request_id", out var reqIdElement) ?
+                        reqIdElement.GetString() ?? string.Empty : string.Empty;
 
-                        // Store public key
-                        device.PublicKey = publicKey;
+                    accepted = root.TryGetProperty("accepted", out var acceptedElement) ?
+                        acceptedElement.GetBoolean() : false;
+                }
 
-                        // Process challenge-response (verify their response and sign their challenge)
-                        if (!string.IsNullOrEmpty(challengeResponse) && !string.IsNullOrEmpty(challenge) && !string.IsNullOrEmpty(publicKey))
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing response for request {requestId}: {accepted}");
+
+                // If we have a pending request for this ID, complete it
+                if (!string.IsNullOrEmpty(requestId) && _pairingRequests.TryGetValue(requestId, out var tcs))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Found pending pairing request: {requestId}");
+
+                    // If accepted, get the device info and shared key
+                    if (accepted)
+                    {
+                        // Extract device info (similar for both connection types but with different property locations)
+                        string deviceId = string.Empty;
+                        string deviceName = string.Empty;
+                        string sharedKey = string.Empty;
+                        string responseHardwareId = hardwareId ?? string.Empty;
+
+                        // Extract from the appropriate location based on connection type
+                        if (connectionType == ConnectionType.Relay && root.TryGetProperty("payload", out var p))
                         {
-                            // Verify their response to our challenge
-                            bool isValid = _deviceManager.HandleChallengeResponse(deviceId, challengeResponse, challenge, hardwareId ?? string.Empty);
+                            // Try payload first, then root
+                            deviceId = p.TryGetProperty("device_id", out var deviceIdElement) ?
+                                deviceIdElement.GetString() ?? string.Empty : string.Empty;
 
-                            if (isValid)
+                            if (string.IsNullOrEmpty(deviceId))
                             {
-                                // Sign their challenge
-                                string signedResponse = _deviceManager.SignChallenge(challenge);
+                                deviceId = root.TryGetProperty("device_id", out var rootDeviceIdElement) ?
+                                    rootDeviceIdElement.GetString() ?? string.Empty :
+                                    (root.TryGetProperty("sender_id", out var senderIdElement) ?
+                                    senderIdElement.GetString() ?? string.Empty : string.Empty);
+                            }
 
-                                // Send the verification
-                                var authVerify = new AuthVerifyMessage
-                                {
-                                    DeviceId = _deviceManager.LocalDeviceId,
-                                    DeviceName = _deviceManager.LocalDeviceName,
-                                    HardwareId = _deviceManager.LocalHardwareId,
-                                    ChallengeResponse = signedResponse
-                                };
+                            deviceName = p.TryGetProperty("device_name", out var deviceNameElement) ?
+                                deviceNameElement.GetString() ?? string.Empty : string.Empty;
 
-                                // Get the device WebSocket
-                                if (_connectedClients.TryGetValue(deviceId, out var deviceWs))
+                            if (string.IsNullOrEmpty(deviceName))
+                            {
+                                deviceName = root.TryGetProperty("device_name", out var rootDeviceNameElement) ?
+                                    rootDeviceNameElement.GetString() ?? string.Empty :
+                                    (root.TryGetProperty("sender_name", out var senderNameElement) ?
+                                    senderNameElement.GetString() ?? string.Empty : string.Empty);
+                            }
+
+                            sharedKey = p.TryGetProperty("encrypted_shared_key", out var sharedKeyElement) ?
+                                sharedKeyElement.GetString() ?? string.Empty : string.Empty;
+
+                            if (string.IsNullOrEmpty(sharedKey) && root.TryGetProperty("encrypted_shared_key", out var rootSharedKeyElement))
+                            {
+                                sharedKey = rootSharedKeyElement.GetString() ?? string.Empty;
+                            }
+
+                            // Get hardware ID
+                            if (p.TryGetProperty("hardware_id", out var hwIdElement))
+                            {
+                                responseHardwareId = hwIdElement.GetString() ?? responseHardwareId;
+                            }
+                            else if (root.TryGetProperty("hardware_id", out var rootHwIdElement))
+                            {
+                                responseHardwareId = rootHwIdElement.GetString() ?? responseHardwareId;
+                            }
+                        }
+                        else
+                        {
+                            // Direct format
+                            deviceId = root.TryGetProperty("device_id", out var deviceIdElement) ?
+                                deviceIdElement.GetString() ?? string.Empty : string.Empty;
+
+                            deviceName = root.TryGetProperty("device_name", out var deviceNameElement) ?
+                                deviceNameElement.GetString() ?? string.Empty : string.Empty;
+
+                            sharedKey = root.TryGetProperty("encrypted_shared_key", out var sharedKeyElement) ?
+                                sharedKeyElement.GetString() ?? string.Empty : string.Empty;
+
+                            if (root.TryGetProperty("hardware_id", out var hwIdElement))
+                            {
+                                responseHardwareId = hwIdElement.GetString() ?? responseHardwareId;
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(deviceId) && !string.IsNullOrEmpty(sharedKey))
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Creating paired device: {deviceName} ({deviceId}), Hardware ID: {responseHardwareId}");
+
+                            // Create and add the device with the appropriate connection type
+                            var device = new PairedDevice
+                            {
+                                DeviceId = deviceId,
+                                DeviceName = deviceName,
+                                Platform = root.TryGetProperty("platform", out var platformElement) ?
+                                    platformElement.GetString() ?? "Unknown" : "Unknown",
+                                SharedKey = sharedKey,
+                                CurrentKeyId = _encryptionService.GetCurrentKeyId(),
+                                LastSeen = DateTime.Now,
+                                HardwareId = responseHardwareId,
+                                ConnectionType = connectionType,
+                                RelayDeviceId = connectionType == ConnectionType.Relay ? deviceId : string.Empty,
+                                IpAddress = connectionType == ConnectionType.Local ?
+                                    (root.TryGetProperty("ip_address", out var ipElement) ?
+                                    ipElement.GetString() ?? string.Empty : string.Empty) : "relay",
+                                Port = connectionType == ConnectionType.Local ?
+                                    (root.TryGetProperty("port", out var portElement) ?
+                                    portElement.GetInt32() : DEFAULT_PORT) : 0
+                            };
+
+                            // Handle challenge-response data (similar for both connection types)
+                            string challengeResponse = string.Empty;
+                            string challenge = string.Empty;
+                            string publicKey = string.Empty;
+
+                            // Extract from the appropriate section
+                            if (connectionType == ConnectionType.Relay && root.TryGetProperty("payload", out var p2))
+                            {
+                                challengeResponse = p2.TryGetProperty("challenge_response", out var responseElement) ?
+                                    responseElement.GetString() ?? string.Empty : string.Empty;
+
+                                if (string.IsNullOrEmpty(challengeResponse) && root.TryGetProperty("challenge_response", out var rootResponseElement))
                                 {
-                                    await SendMessageAsync(deviceWs, authVerify, cancellationToken);
+                                    challengeResponse = rootResponseElement.GetString() ?? string.Empty;
+                                }
+
+                                challenge = p2.TryGetProperty("challenge", out var challengeElement) ?
+                                    challengeElement.GetString() ?? string.Empty : string.Empty;
+
+                                if (string.IsNullOrEmpty(challenge) && root.TryGetProperty("challenge", out var rootChallengeElement))
+                                {
+                                    challenge = rootChallengeElement.GetString() ?? string.Empty;
+                                }
+
+                                publicKey = p2.TryGetProperty("public_key", out var keyElement) ?
+                                    keyElement.GetString() ?? string.Empty : string.Empty;
+
+                                if (string.IsNullOrEmpty(publicKey) && root.TryGetProperty("public_key", out var rootKeyElement))
+                                {
+                                    publicKey = rootKeyElement.GetString() ?? string.Empty;
                                 }
                             }
+                            else
+                            {
+                                challengeResponse = root.TryGetProperty("challenge_response", out var responseElement) ?
+                                    responseElement.GetString() ?? string.Empty : string.Empty;
+
+                                challenge = root.TryGetProperty("challenge", out var challengeElement) ?
+                                    challengeElement.GetString() ?? string.Empty : string.Empty;
+
+                                publicKey = root.TryGetProperty("public_key", out var keyElement) ?
+                                    keyElement.GetString() ?? string.Empty : string.Empty;
+                            }
+
+                            // Store public key if available
+                            if (!string.IsNullOrEmpty(publicKey))
+                            {
+                                device.PublicKey = publicKey;
+                            }
+
+                            _deviceManager.AddOrUpdateDevice(device);
+
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Added/updated device {deviceId} with connection type {connectionType}");
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Missing required fields in pairing response. DeviceId: {deviceId}, SharedKey: {!string.IsNullOrEmpty(sharedKey)}");
                         }
                     }
 
-                    _deviceManager.AddOrUpdateDevice(device);
+                    // Complete the task
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Completing pairing request task with result: {accepted}");
+                    tcs.TrySetResult(accepted);
+                    _pairingRequests.Remove(requestId);
                 }
-
-                // Complete the task
-                tcs.TrySetResult(accepted);
-                _pairingRequests.Remove(requestId);
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No pending request found for ID: {requestId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing pairing response: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Stack trace: {ex.StackTrace}");
             }
         }
 
@@ -2012,8 +2056,8 @@ namespace OpenRelay.Services
         /// </summary>
         private async Task<WebSocket?> ConnectToDeviceAsync(PairedDevice device, CancellationToken cancellationToken)
         {
-            // If this is a relay-paired device, handle differently
-            if (device.IsRelayPaired)
+            // Handle based on connection type
+            if (device.ConnectionType == ConnectionType.Relay)
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} is relay-paired, checking relay connection");
 
@@ -2031,10 +2075,11 @@ namespace OpenRelay.Services
 
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Using relay connection for device {device.DeviceName} (ID: {device.DeviceId}, Relay ID: {device.RelayDeviceId})");
 
-                // For relay devices, we use the relay connection
-                return null; // No direct WebSocket connection for relay devices
+                // For relay devices, we don't return a WebSocket
+                return null;
             }
 
+            // For local devices
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Connecting to {device.DeviceName} at {device.IpAddress}:{device.Port}");
@@ -2042,11 +2087,11 @@ namespace OpenRelay.Services
                 var uri = new Uri($"wss://{device.IpAddress}:{device.Port}/");
                 var client = new ClientWebSocket();
 
-                // Enhanced certificate validation with certificate pinning
+                // Certificate validation
                 client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
                     string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
 
-                    // First connection to this device
+                    // Check trusted certificates
                     if (!_trustedCertificates.TryGetValue(device.IpAddress, out var storedThumbprint))
                     {
                         _trustedCertificates[device.IpAddress] = thumbprint;
@@ -2054,7 +2099,7 @@ namespace OpenRelay.Services
                         return true;
                     }
 
-                    // For subsequent connections, verify it's the same certificate
+                    // Verify certificate
                     bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
                     if (!isValid)
                     {
@@ -2063,15 +2108,12 @@ namespace OpenRelay.Services
                     return isValid;
                 };
 
+                // Connect with timeout
                 var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
-
-                // Connect to the device
                 await client.ConnectAsync(uri, linkedCts.Token);
 
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Connected to {device.DeviceName}, sending auth message");
-
-                // Create auth message with current key ID and hardware ID
+                // Send authentication message
                 var authMessage = new AuthMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
@@ -2089,10 +2131,7 @@ namespace OpenRelay.Services
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Auth message sent to {device.DeviceName}");
 
                 // Start listening for responses
-                _ = Task.Run(async () =>
-                {
-                    await ProcessWebSocketMessagesAsync(client, device);
-                });
+                _ = Task.Run(async () => await ProcessWebSocketMessagesAsync(client, device));
 
                 // Add to connected clients
                 _connectedClients[device.DeviceId] = client;
@@ -2378,57 +2417,18 @@ namespace OpenRelay.Services
         /// <summary>
         /// Send a pairing request to a device using secure connection
         /// </summary>
-        public async Task<bool> SendPairingRequestAsync(string ipAddress, bool useRelay = false, int port = DEFAULT_PORT, CancellationToken cancellationToken = default)
+        public async Task<bool> SendPairingRequestAsync(string targetIdentifier, ConnectionType connectionType, int port = DEFAULT_PORT, CancellationToken cancellationToken = default)
         {
-            // Handle relay pairing differently
-            if (useRelay)
-            {
-                return await SendRelayPairingRequestAsync(ipAddress, cancellationToken);
-            }
-
             try
             {
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {ipAddress}:{port}");
-
-                // Create a secure WSS
-                var uri = new Uri($"wss://{ipAddress}:{port}/");
-                using var client = new ClientWebSocket();
-
-                // Set up certificate validation with pinning
-                client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
-                    string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
-
-                    // First connection to this IP address during pairing
-                    if (!_trustedCertificates.TryGetValue(ipAddress, out var storedThumbprint))
-                    {
-                        // During pairing, we trust the first certificate encountered for this IP
-                        // The user should verify this out-of-band if possible, or accept the risk
-                        _trustedCertificates[ipAddress] = thumbprint;
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Trusting certificate {thumbprint} for {ipAddress}");
-                        return true;
-                    }
-
-                    // For subsequent connections (shouldn't happen during initial pairing request, but good practice)
-                    bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
-                    if (!isValid)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Certificate mismatch for {ipAddress}!");
-                    }
-                    return isValid;
-                };
-
-                // Set a connection timeout
-                var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
-
-                // Connect to the device
-                await client.ConnectAsync(uri, linkedCts.Token);
-
-                // Generate a challenge for secure pairing
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {targetIdentifier} via {connectionType}");
+                
+                // Generate a challenge for secure pairing (common for both connection types)
                 string challenge = _deviceManager.GenerateChallenge();
                 string publicKey = _deviceManager.GetPublicKey();
-
-                // Create a pairing request message
+                
+                // Create a pairing request message with a specific request ID (common for both connection types)
+                string requestId = Guid.NewGuid().ToString();
                 var request = new PairingRequestMessage
                 {
                     DeviceId = _deviceManager.LocalDeviceId,
@@ -2436,126 +2436,186 @@ namespace OpenRelay.Services
                     HardwareId = _deviceManager.LocalHardwareId,
                     Platform = _deviceManager.LocalPlatform,
                     Challenge = challenge,
-                    PublicKey = publicKey
+                    PublicKey = publicKey,
+                    RequestId = requestId
                 };
-
-                // Create a task completion source for the response
+                
+                // Create task completion source for response (common for both connection types)
                 var tcs = new TaskCompletionSource<bool>();
-                _pairingRequests[request.RequestId] = tcs;
-
-                // Send the request
-                await SendMessageAsync(client, request, linkedCts.Token);
-
-                // Start listening for the response
-                _ = Task.Run(async () =>
+                _pairingRequests[requestId] = tcs;
+                
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Created pairing request with ID: {requestId}");
+                
+                // Handle based on connection type
+                if (connectionType == ConnectionType.Relay)
                 {
-                    var buffer = new byte[16384];
-
-                    try
+                    // For relay connections, ensure we're connected to the relay server
+                    if (!_isConnectedToRelayServer || _relayConnection == null)
                     {
-                        while (client.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+                        bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                        if (!connected)
                         {
-                            // Receive a message
-                            var receiveResult = await client.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                            System.Diagnostics.Debug.WriteLine("[NETWORK] Cannot send relay pairing request, not connected to relay server");
+                            _pairingRequests.Remove(requestId);
+                            return false;
+                        }
+                    }
+                    
+                    // Send request via relay server
+                    await _relayConnection.SendMessageAsync(targetIdentifier, "PairingRequest", request);
+                }
+                else // ConnectionType.Local
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending pairing request to {targetIdentifier}:{port}");
 
-                            // Check if the server is closing the connection
-                            if (receiveResult.MessageType == WebSocketMessageType.Close)
+                    // Create a secure WSS
+                    var uri = new Uri($"wss://{targetIdentifier}:{port}/");
+                    using var client = new ClientWebSocket();
+
+                    // Set up certificate validation with pinning
+                    client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => {
+                        string thumbprint = certificate?.GetCertHashString() ?? string.Empty;
+
+                        // First connection to this IP address during pairing
+                        if (!_trustedCertificates.TryGetValue(targetIdentifier, out var storedThumbprint))
+                        {
+                            // During pairing, we trust the first certificate encountered for this IP
+                            // The user should verify this out-of-band if possible, or accept the risk
+                            _trustedCertificates[targetIdentifier] = thumbprint;
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Trusting certificate {thumbprint} for {targetIdentifier}");
+                            return true;
+                        }
+
+                        // For subsequent connections (shouldn't happen during initial pairing request, but good practice)
+                        bool isValid = string.Equals(thumbprint, storedThumbprint, StringComparison.OrdinalIgnoreCase);
+                        if (!isValid)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing: Certificate mismatch for {targetIdentifier}!");
+                        }
+                        return isValid;
+                    };
+
+                    // Set a connection timeout
+                    var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
+
+                    // Connect to the device
+                    await client.ConnectAsync(uri, linkedCts.Token);
+
+                    // Send the request
+                    await SendMessageAsync(client, request, linkedCts.Token);
+
+                    // Start listening for the response
+                    _ = Task.Run(async () =>
+                    {
+                        var buffer = new byte[16384];
+
+                        try
+                        {
+                            while (client.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
                             {
-                                await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", cancellationToken);
-                                tcs.TrySetResult(false);
-                                break;
-                            }
+                                // Receive a message
+                                var receiveResult = await client.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
 
-                            // Process the message
-                            if (receiveResult.MessageType == WebSocketMessageType.Text)
-                            {
-                                var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
-
-                                try
+                                // Check if the server is closing the connection
+                                if (receiveResult.MessageType == WebSocketMessageType.Close)
                                 {
-                                    // Parse the message as JSON
-                                    var jsonDoc = JsonDocument.Parse(message);
-                                    var root = jsonDoc.RootElement;
-
-                                    // Check message type
-                                    if (root.TryGetProperty("type", out var typeProperty))
-                                    {
-                                        var type = typeProperty.GetString() ?? string.Empty;
-
-                                        if (type == MessageType.PairingResponse.ToString())
-                                        {
-                                            // Handle pairing response
-                                            await HandlePairingResponseAsync(root, null, cancellationToken);
-
-                                            // If there's challenge/response data, handle verification
-                                            if (root.TryGetProperty("challenge_response", out var responseElement) &&
-                                                root.TryGetProperty("challenge", out var challengeElement) &&
-                                                root.TryGetProperty("public_key", out var keyElement))
-                                            {
-                                                string challengeResponse = responseElement.GetString() ?? string.Empty;
-                                                string newChallenge = challengeElement.GetString() ?? string.Empty;
-                                                string theirPublicKey = keyElement.GetString() ?? string.Empty;
-
-                                                // Get device ID
-                                                string deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
-
-                                                // Verify their response to our challenge
-                                                if (!string.IsNullOrEmpty(challengeResponse) && !string.IsNullOrEmpty(newChallenge) &&
-                                                    !string.IsNullOrEmpty(theirPublicKey))
-                                                {
-                                                    bool isValid = _deviceManager.VerifyChallengeResponse(challenge, challengeResponse, theirPublicKey);
-
-                                                    if (isValid)
-                                                    {
-                                                        // Sign their challenge
-                                                        string signedResponse = _deviceManager.SignChallenge(newChallenge);
-
-                                                        // Send verification
-                                                        var authVerify = new AuthVerifyMessage
-                                                        {
-                                                            DeviceId = _deviceManager.LocalDeviceId,
-                                                            DeviceName = _deviceManager.LocalDeviceName,
-                                                            HardwareId = _deviceManager.LocalHardwareId,
-                                                            ChallengeResponse = signedResponse
-                                                        };
-
-                                                        await SendMessageAsync(client, authVerify, cancellationToken);
-                                                    }
-                                                }
-                                            }
-
-                                            // Close the connection
-                                            await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Pairing complete", cancellationToken);
-                                            break;
-                                        }
-                                        else if (type == MessageType.AuthVerify.ToString())
-                                        {
-                                            // Handle verification
-                                            await HandleAuthVerifyAsync(client, root, null, cancellationToken);
-
-                                            // Close the connection - pairing is complete
-                                            await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Pairing complete", cancellationToken);
-                                            break;
-                                        }
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing pairing response: {ex.Message}");
+                                    await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", cancellationToken);
                                     tcs.TrySetResult(false);
                                     break;
                                 }
+
+                                // Process the message
+                                if (receiveResult.MessageType == WebSocketMessageType.Text)
+                                {
+                                    var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
+
+                                    try
+                                    {
+                                        // Parse the message as JSON
+                                        var jsonDoc = JsonDocument.Parse(message);
+                                        var root = jsonDoc.RootElement;
+
+                                        // Check message type
+                                        if (root.TryGetProperty("type", out var typeProperty))
+                                        {
+                                            var type = typeProperty.GetString() ?? string.Empty;
+
+                                            if (type == MessageType.PairingResponse.ToString())
+                                            {
+                                                // Handle pairing response
+                                                await HandlePairingResponseAsync(root, null, ConnectionType.Local, cancellationToken);
+
+                                                // If there's challenge/response data, handle verification
+                                                if (root.TryGetProperty("challenge_response", out var responseElement) &&
+                                                    root.TryGetProperty("challenge", out var challengeElement) &&
+                                                    root.TryGetProperty("public_key", out var keyElement))
+                                                {
+                                                    string challengeResponse = responseElement.GetString() ?? string.Empty;
+                                                    string newChallenge = challengeElement.GetString() ?? string.Empty;
+                                                    string theirPublicKey = keyElement.GetString() ?? string.Empty;
+
+                                                    // Get device ID
+                                                    string deviceId = root.GetProperty("device_id").GetString() ?? string.Empty;
+
+                                                    // Verify their response to our challenge
+                                                    if (!string.IsNullOrEmpty(challengeResponse) && !string.IsNullOrEmpty(newChallenge) &&
+                                                        !string.IsNullOrEmpty(theirPublicKey))
+                                                    {
+                                                        bool isValid = _deviceManager.VerifyChallengeResponse(challenge, challengeResponse, theirPublicKey);
+
+                                                        if (isValid)
+                                                        {
+                                                            // Sign their challenge
+                                                            string signedResponse = _deviceManager.SignChallenge(newChallenge);
+
+                                                            // Send verification
+                                                            var authVerify = new AuthVerifyMessage
+                                                            {
+                                                                DeviceId = _deviceManager.LocalDeviceId,
+                                                                DeviceName = _deviceManager.LocalDeviceName,
+                                                                HardwareId = _deviceManager.LocalHardwareId,
+                                                                ChallengeResponse = signedResponse
+                                                            };
+
+                                                            await SendMessageAsync(client, authVerify, cancellationToken);
+                                                        }
+                                                    }
+                                                }
+
+                                                // Close the connection
+                                                await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Pairing complete", cancellationToken);
+                                                break;
+                                            }
+                                            else if (type == MessageType.AuthVerify.ToString())
+                                            {
+                                                // Handle verification
+                                                await HandleAuthVerifyAsync(client, root, null, cancellationToken);
+
+                                                // Close the connection - pairing is complete
+                                                await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Pairing complete", cancellationToken);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error processing pairing response: {ex.Message}");
+                                        tcs.TrySetResult(false);
+                                        break;
+                                    }
+                                }
                             }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Error receiving pairing response: {ex.Message}");
-                        tcs.TrySetResult(false);
-                    }
-                });
-
-                // Wait for the response with a timeout
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Error receiving pairing response: {ex.Message}");
+                            tcs.TrySetResult(false);
+                        }
+                    });
+                }
+                
+                // Wait for response with timeout (common for both connection types)
                 if (await Task.WhenAny(tcs.Task, Task.Delay(30000, cancellationToken)) == tcs.Task)
                 {
                     return await tcs.Task;
@@ -2563,8 +2623,8 @@ namespace OpenRelay.Services
                 else
                 {
                     // Timeout
-                    System.Diagnostics.Debug.WriteLine("[NETWORK] Pairing request timed out");
-                    _pairingRequests.Remove(request.RequestId);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Pairing request to {targetIdentifier} via {connectionType} timed out");
+                    _pairingRequests.Remove(requestId);
                     return false;
                 }
             }
@@ -2720,35 +2780,27 @@ namespace OpenRelay.Services
             {
                 try
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId})");
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Processing device {device.DeviceName} ({device.DeviceId}) with connection type {device.ConnectionType}");
 
-                    // Handle relay devices separately
-                    if (device.IsRelayPaired)
+                    // Process based on connection type
+                    switch (device.ConnectionType)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} is relay-paired with relay ID: {device.RelayDeviceId}");
-                        await SendClipboardDataViaRelayAsync(data, device, cancellationToken);
-                        sentCount++;
-                        continue;
+                        case ConnectionType.Relay:
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} is relay-paired with relay ID: {device.RelayDeviceId}");
+                            if (await SendClipboardDataByConnectionTypeAsync(data, device, ConnectionType.Relay, cancellationToken))
+                            {
+                                sentCount++;
+                            }
+                            break;
+
+                        case ConnectionType.Local:
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} is locally paired with IP: {device.IpAddress}");
+                            if (await SendClipboardDataByConnectionTypeAsync(data, device, ConnectionType.Local, cancellationToken))
+                            {
+                                sentCount++;
+                            }
+                            break;
                     }
-
-                    // Check if the device is connected
-                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
-
-                        // Try to connect
-                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
-
-                        // Check again after connection attempt
-                        if (webSocket == null || webSocket.State != WebSocketState.Open)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}, skipping");
-                            continue;
-                        }
-                    }
-
-                    // Rest of the method for handling direct connections...
-                    // (existing code)
                 }
                 catch (Exception ex)
                 {
@@ -2759,13 +2811,138 @@ namespace OpenRelay.Services
             System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent to {sentCount} devices");
         }
 
+        /// <summary>
+        /// Send clipboard data to a specific device based on its connection type
+        /// </summary>
+        private async Task<bool> SendClipboardDataByConnectionTypeAsync(ClipboardData data, PairedDevice device, ConnectionType connectionType, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Common preparation for both connection types
+                if (string.IsNullOrEmpty(device.SharedKey))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] No shared key for {device.DeviceName}, skipping");
+                    return false;
+                }
+
+                string encryptedData;
+                bool isBinary = false;
+
+                // Encrypt the data (same for both connection types)
+                if (data.Format == "text/plain" && data.TextData != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting text: {data.TextData.Length} chars");
+                    encryptedData = _encryptionService.EncryptText(data.TextData, device.SharedKey);
+                }
+                else if (data.Format == "image/png" && data.BinaryData != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Encrypting binary: {data.BinaryData.Length} bytes");
+                    var encryptedBytes = _encryptionService.EncryptData(data.BinaryData, Convert.FromBase64String(device.SharedKey));
+                    encryptedData = Convert.ToBase64String(encryptedBytes);
+                    isBinary = true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Unsupported data format: {data.Format}");
+                    return false;
+                }
+
+                // Create the common message
+                var message = new ClipboardUpdateMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    HardwareId = _deviceManager.LocalHardwareId,
+                    Format = data.Format,
+                    Data = encryptedData,
+                    IsBinary = isBinary,
+                    KeyId = _encryptionService.GetCurrentKeyId(),
+                    Timestamp = data.Timestamp
+                };
+
+                // Handle differently based on connection type
+                if (connectionType == ConnectionType.Relay)
+                {
+                    // For relay connections
+                    if (!_isConnectedToRelayServer || _relayConnection == null)
+                    {
+                        bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                        if (!connected)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot send data to {device.DeviceName} - relay server not connected");
+                            return false;
+                        }
+                    }
+
+                    // Use the relay connection to send the message
+                    string relayId = device.RelayDeviceId;
+                    if (string.IsNullOrEmpty(relayId))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] No relay ID for device {device.DeviceName}, using device ID: {device.DeviceId}");
+                        relayId = device.DeviceId;
+                    }
+
+                    // Serialize message to JSON
+                    string messageJson = JsonSerializer.Serialize(message);
+
+                    // Send via relay server using the proper content type
+                    string contentType = isBinary ? "Image" : "Text";
+
+                    // IMPORTANT: Use Base64 encoding for the relay server
+                    string base64Message = Convert.ToBase64String(Encoding.UTF8.GetBytes(messageJson));
+
+                    // Check size and handle chunking if needed
+                    int maxChunkSize = 50 * 1024; // 50KB max chunk size
+
+                    if (Encoding.UTF8.GetByteCount(messageJson) > maxChunkSize)
+                    {
+                        // Need to chunk the data
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Message too large, sending in chunks");
+                        await SendChunkedClipboardDataAsync(relayId, message, encryptedData, cancellationToken);
+                    }
+                    else
+                    {
+                        // Send directly
+                        await _relayConnection.SendEncryptedDataAsync(relayId, base64Message, contentType, cancellationToken);
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent via relay to {device.DeviceName}");
+                    return true;
+                }
+                else // ConnectionType.Local
+                {
+                    // For local connections
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+
+                        if (webSocket == null || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName}, skipping");
+                            return false;
+                        }
+                    }
+
+                    // Send via WebSocket
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Clipboard data sent to {device.DeviceName} via WebSocket");
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending clipboard data to {device.DeviceName}: {ex.Message}");
+                return false;
+            }
+        }
 
         /// <summary>
         /// Send clipboard data via relay server with chunking for large content
         /// </summary>
         private async Task SendClipboardDataViaRelayAsync(ClipboardData data, PairedDevice device, CancellationToken cancellationToken)
         {
-            if (data == null || !device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+            if (data == null || device.ConnectionType != ConnectionType.Relay || string.IsNullOrEmpty(device.RelayDeviceId))
             {
                 System.Diagnostics.Debug.WriteLine("[NETWORK] Invalid relay device or data");
                 return;
@@ -3131,29 +3308,7 @@ namespace OpenRelay.Services
                     {
                         try
                         {
-                            // Check if it's a relay device
-                            if (device.IsRelayPaired)
-                            {
-                                await SendKeyRotationUpdateViaRelayAsync(device, cancellationToken);
-                                continue;
-                            }
-
-                            // Try to connect to the device if not connected
-                            if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
-                            {
-                                System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
-                                webSocket = await ConnectToDeviceAsync(device, cancellationToken);
-
-                                // Check if connected
-                                if (webSocket == null || webSocket.State != WebSocketState.Open)
-                                {
-                                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key rotation");
-                                    continue;
-                                }
-                            }
-
-                            // Send key update to this device
-                            await SendKeyUpdateToDeviceAsync(device, webSocket, cancellationToken);
+                            await SendKeyUpdateByConnectionTypeAsync(device, cancellationToken);
                         }
                         catch (Exception ex)
                         {
@@ -3165,6 +3320,92 @@ namespace OpenRelay.Services
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Error checking key rotation: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Send a key update to a device based on its connection type
+        /// </summary>
+        private async Task SendKeyUpdateByConnectionTypeAsync(PairedDevice device, CancellationToken cancellationToken)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Sending key update to {device.DeviceName} via {device.ConnectionType}");
+
+                // Get key update package
+                byte[] keyPackage = _encryptionService.GetKeyUpdatePackage(device.CurrentKeyId);
+
+                // Check if we have a valid package
+                if (keyPackage.Length == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Failed to get key update package for device {device.DeviceName}");
+                    return;
+                }
+
+                // Encrypt the key package with the device's shared key
+                byte[] encryptedPackage = _encryptionService.EncryptData(keyPackage, Convert.FromBase64String(device.SharedKey));
+
+                // Create key rotation update message
+                var message = new KeyRotationUpdateMessage
+                {
+                    DeviceId = _deviceManager.LocalDeviceId,
+                    DeviceName = _deviceManager.LocalDeviceName,
+                    HardwareId = _deviceManager.LocalHardwareId,
+                    CurrentKeyId = _encryptionService.GetCurrentKeyId(),
+                    KeyPackage = Convert.ToBase64String(encryptedPackage)
+                };
+
+                // Handle based on connection type
+                if (device.ConnectionType == ConnectionType.Relay)
+                {
+                    // For relay connections
+                    if (!_isConnectedToRelayServer || _relayConnection == null)
+                    {
+                        bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                        if (!connected)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot send key update to {device.DeviceName} - relay server not connected");
+                            return;
+                        }
+                    }
+
+                    // Send via relay
+                    string relayId = device.RelayDeviceId;
+                    if (string.IsNullOrEmpty(relayId))
+                    {
+                        relayId = device.DeviceId;
+                    }
+
+                    await _relayConnection.SendMessageAsync(relayId, "KeyRotationUpdate", message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent via relay to {device.DeviceName}");
+                }
+                else // ConnectionType.Local
+                {
+                    // For local connections
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+
+                        if (webSocket == null || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key update");
+                            return;
+                        }
+                    }
+
+                    // Send via WebSocket
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation update sent to {device.DeviceName} via WebSocket");
+                }
+
+                // Update device's key ID
+                device.CurrentKeyId = _encryptionService.GetCurrentKeyId();
+                _deviceManager.UpdateDevice(device);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NETWORK] Error sending key update to device: {ex.Message}");
             }
         }
 
@@ -3221,7 +3462,7 @@ namespace OpenRelay.Services
         {
             try
             {
-                if (!device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+                if (device.ConnectionType != ConnectionType.Relay || string.IsNullOrEmpty(device.RelayDeviceId))
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Cannot send key update - not a relay paired device");
                     return;
@@ -3289,27 +3530,6 @@ namespace OpenRelay.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[NETWORK] Requesting key update from {device.DeviceName}");
 
-                // Check if it's a relay device
-                if (device.IsRelayPaired)
-                {
-                    await RequestKeyUpdateViaRelayAsync(device, cancellationToken);
-                    return;
-                }
-
-                // Try to connect to the device if not connected
-                if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
-                    webSocket = await ConnectToDeviceAsync(device, cancellationToken);
-
-                    // Check if connected
-                    if (webSocket == null || webSocket.State != WebSocketState.Open)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key update request");
-                        return;
-                    }
-                }
-
                 // Create key rotation request message
                 var message = new KeyRotationRequestMessage
                 {
@@ -3319,9 +3539,49 @@ namespace OpenRelay.Services
                     LastKnownKeyId = device.CurrentKeyId
                 };
 
-                // Send message
-                await SendMessageAsync(webSocket, message, cancellationToken);
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key update request sent to {device.DeviceName}");
+                // Branch by connection type
+                if (device.ConnectionType == ConnectionType.Relay)
+                {
+                    // For relay devices
+                    if (!_isConnectedToRelayServer || _relayConnection == null)
+                    {
+                        bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                        if (!connected)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot request key update from {device.DeviceName} - relay server not connected");
+                            return;
+                        }
+                    }
+
+                    // Send via relay
+                    string relayId = device.RelayDeviceId;
+                    if (string.IsNullOrEmpty(relayId))
+                    {
+                        relayId = device.DeviceId;
+                    }
+
+                    await _relayConnection.SendMessageAsync(relayId, "KeyRotationRequest", message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key update request sent via relay to {device.DeviceName}");
+                }
+                else // ConnectionType.Local
+                {
+                    // For local connections
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+
+                        if (webSocket == null || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key update request");
+                            return;
+                        }
+                    }
+
+                    // Send via WebSocket
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key update request sent to {device.DeviceName} via WebSocket");
+                }
             }
             catch (Exception ex)
             {
@@ -3336,7 +3596,7 @@ namespace OpenRelay.Services
         {
             try
             {
-                if (!device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+                if (device.ConnectionType != ConnectionType.Relay || string.IsNullOrEmpty(device.RelayDeviceId))
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Cannot request key update - not a relay paired device");
                     return;
@@ -3417,7 +3677,7 @@ namespace OpenRelay.Services
                     byte[] encryptedPackage = Convert.FromBase64String(keyPackage);
                     byte[] packageData = _encryptionService.DecryptData(encryptedPackage, Convert.FromBase64String(device.SharedKey));
 
-                    // Import the key package (using existing method instead of ApplyKeyUpdatePackage)
+                    // Import the key package
                     uint importedKeyId = _encryptionService.ImportKeyUpdatePackage(packageData);
 
                     if (importedKeyId == 0)
@@ -3462,27 +3722,6 @@ namespace OpenRelay.Services
         {
             try
             {
-                // Check if it's a relay device
-                if (device.IsRelayPaired)
-                {
-                    await SendKeyRotationAckViaRelayAsync(device, keyId, success, cancellationToken);
-                    return;
-                }
-
-                // Try to connect to the device if not connected
-                if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
-                    webSocket = await ConnectToDeviceAsync(device, cancellationToken);
-
-                    // Check if connected
-                    if (webSocket == null || webSocket.State != WebSocketState.Open)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key rotation ACK");
-                        return;
-                    }
-                }
-
                 // Create key rotation ACK message
                 var message = new
                 {
@@ -3494,9 +3733,49 @@ namespace OpenRelay.Services
                     success = success
                 };
 
-                // Send message
-                await SendMessageAsync(webSocket, message, cancellationToken);
-                System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation ACK sent to {device.DeviceName}, success: {success}");
+                // Branch by connection type
+                if (device.ConnectionType == ConnectionType.Relay)
+                {
+                    // For relay devices
+                    if (!_isConnectedToRelayServer || _relayConnection == null)
+                    {
+                        bool connected = await ConnectToRelayServerAsync(cancellationToken);
+                        if (!connected)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Cannot send key rotation ACK to {device.DeviceName} - relay server not connected");
+                            return;
+                        }
+                    }
+
+                    // Send via relay
+                    string relayId = device.RelayDeviceId;
+                    if (string.IsNullOrEmpty(relayId))
+                    {
+                        relayId = device.DeviceId;
+                    }
+
+                    await _relayConnection.SendMessageAsync(relayId, "KeyRotationAck", message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation ACK sent via relay to {device.DeviceName}, success: {success}");
+                }
+                else // ConnectionType.Local
+                {
+                    // For local connections
+                    if (!_connectedClients.TryGetValue(device.DeviceId, out var webSocket) || webSocket.State != WebSocketState.Open)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} not connected, attempting connection");
+                        webSocket = await ConnectToDeviceAsync(device, cancellationToken);
+
+                        if (webSocket == null || webSocket.State != WebSocketState.Open)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[NETWORK] Could not connect to {device.DeviceName} for key rotation ACK");
+                            return;
+                        }
+                    }
+
+                    // Send via WebSocket
+                    await SendMessageAsync(webSocket, message, cancellationToken);
+                    System.Diagnostics.Debug.WriteLine($"[NETWORK] Key rotation ACK sent to {device.DeviceName}, success: {success}");
+                }
             }
             catch (Exception ex)
             {
@@ -3511,7 +3790,7 @@ namespace OpenRelay.Services
         {
             try
             {
-                if (!device.IsRelayPaired || string.IsNullOrEmpty(device.RelayDeviceId))
+                if (device.ConnectionType != ConnectionType.Relay || string.IsNullOrEmpty(device.RelayDeviceId))
                 {
                     System.Diagnostics.Debug.WriteLine("[NETWORK] Cannot send key rotation ACK - not a relay paired device");
                     return;
@@ -3585,7 +3864,9 @@ namespace OpenRelay.Services
                 if (lastKnownKeyId != currentKeyId)
                 {
                     System.Diagnostics.Debug.WriteLine($"[NETWORK] Device {device.DeviceName} needs key update: {lastKnownKeyId} -> {currentKeyId}");
-                    await SendKeyUpdateToDeviceAsync(device, webSocket, cancellationToken);
+
+                    // Send key update using the unified method
+                    await SendKeyUpdateByConnectionTypeAsync(device, cancellationToken);
                 }
                 else
                 {

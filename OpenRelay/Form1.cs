@@ -355,10 +355,10 @@ namespace OpenRelay
                 {
                     string ipAddress = dialog.InputText;
 
-                    // Send pairing request
+                    // Send pairing request with ConnectionType.Local
                     Task.Run(async () =>
                     {
-                        bool success = await _networkService.SendPairingRequestAsync(ipAddress, false);
+                        bool success = await _networkService.SendPairingRequestAsync(ipAddress, ConnectionType.Local);
 
                         if (InvokeRequired)
                         {
@@ -372,6 +372,7 @@ namespace OpenRelay
                 }
             }
         }
+
 
         private void AddDeviceRelayItem_Click(object? sender, EventArgs e)
         {
@@ -393,10 +394,10 @@ namespace OpenRelay
                 {
                     string relayId = dialog.InputText;
 
-                    // Send pairing request
+                    // Send pairing request with ConnectionType.Relay
                     Task.Run(async () =>
                     {
-                        bool success = await _networkService.SendPairingRequestAsync(relayId, true);
+                        bool success = await _networkService.SendPairingRequestAsync(relayId, ConnectionType.Relay);
 
                         if (InvokeRequired)
                         {

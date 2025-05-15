@@ -1,7 +1,24 @@
 ﻿using System;
 
 namespace OpenRelay.Models
+
 {
+    /// <summary>
+    /// How the paired device is connected
+    /// </summary>
+    public enum ConnectionType
+    {
+        /// <summary>
+        /// Device is connected via LAN
+        /// </summary>
+        Local,
+
+        /// <summary>
+        /// Device is connected via the relay server
+        /// </summary>
+        Relay
+    }
+
     /// <summary>
     /// Represents a device paired with this application
     /// </summary>
@@ -53,12 +70,12 @@ namespace OpenRelay.Models
         public byte[]? EncryptedStorageData { get; set; }
 
         /// <summary>
-        /// Whether this device is paired via the relay server
+        /// Connection type for this device
         /// </summary>
-        public bool IsRelayPaired { get; set; } = false;
+        public ConnectionType ConnectionType { get; set; } = ConnectionType.Local;
 
         /// <summary>
-        /// Device ID on the relay server (may be different from local DeviceId)
+        /// Device ID on the relay server (only used for Relay connections)
         /// </summary>
         public string RelayDeviceId { get; set; } = string.Empty;
 
@@ -79,7 +96,8 @@ namespace OpenRelay.Models
 
         public override string ToString()
         {
-            return $"{DeviceName} ({(IsRelayPaired ? "Relay" : IpAddress)})";
+            return $"{DeviceName} ({(ConnectionType == ConnectionType.Relay ? "Relay" : IpAddress)})";
         }
     }
+
 }
